@@ -33,7 +33,22 @@ export async function POST(request) {
         throw new Error('Missing WELLFOUND_EMAIL or WELLFOUND_PASSWORD in environment');
       }
 
-      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: true }));
+      // Wellfound is protected by Cloudflare/DataDome, which hard-blocks datacenter
+      // IPs (verified: the server only ever gets the CF challenge page, never the
+      // login form). So Wellfound cannot run on the server — bail out with a clear
+      // instruction instead of the confusing ":9222 attach failed" error.
+      if (process.env.APPLY_HEADLESS === 'true') {
+        await send('⛔ Wellfound can\'t run on the server — Cloudflare blocks datacenter IPs.');
+        await send('▶ Run Wellfound from your LOCAL machine: `npm run dev` then click "Apply All Wellfound Jobs" on localhost. A browser window will open for you to sign in once.');
+        await send('DONE: Wellfound skipped on server. Use the local dashboard for Wellfound; the prod link is for Naukri.');
+        await writer.close().catch(() => {});
+        return;
+      }
+
+      // Locally: attach to your visible Chrome on :9222 if it's running, otherwise
+      // launch a fresh visible window (requireConnected:false) so you can sign in
+      // and clear any Cloudflare challenge yourself — no debug-port setup needed.
+      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: false }));
       const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
         hosts: ['wellfound.com'],
       });
