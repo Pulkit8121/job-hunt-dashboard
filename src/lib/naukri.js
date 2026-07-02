@@ -174,14 +174,18 @@ export async function resolveNaukriJobDetail(page, naukriJobUrl) {
   }
 }
 
-// Fill an input via JS (bypasses Puppeteer clickability checks)
+// Fill an input via JS (bypasses Puppeteer clickability checks).
+// Uses React's native value setter — Naukri's login form is React-controlled, so a
+// plain `el.value = v` is silently discarded on submit (the form sees empty fields
+// and re-renders itself). The native setter + input event updates React's state.
 async function fillInput(page, selectors, value) {
   for (const sel of selectors) {
     const filled = await page.evaluate((s, v) => {
       const el = document.querySelector(s);
       if (!el) return false;
       el.focus();
-      el.value = v;
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      if (desc && desc.set) desc.set.call(el, v); else el.value = v;
       el.dispatchEvent(new Event('input',  { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
