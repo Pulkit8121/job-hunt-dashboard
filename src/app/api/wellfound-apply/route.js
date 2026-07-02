@@ -1,7 +1,7 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { getBrowser } from '@/lib/browser';
+import { getBrowser, getReusablePage } from '@/lib/browser';
 import { recordApplied } from '@/lib/db';
 import {
   wellfoundLogin,
@@ -31,36 +31,34 @@ export async function POST(request) {
         throw new Error('Missing WELLFOUND_EMAIL or WELLFOUND_PASSWORD in environment');
       }
 
-      ({ browser, connected } = await getBrowser({ headless: false }));
-
-      // Use one tab for login, one for applying
-      const loginPage = await browser.newPage();
+      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: true }));
+      const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
+        hosts: ['wellfound.com'],
+      });
 
       if (connected) {
-        await send('▶ Connected to your existing Chrome. Checking Wellfound login...');
-        await loginPage.goto('https://wellfound.com', { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-        const isLoggedIn = await loginPage.evaluate(() =>
+        await send(`▶ Connected to your existing Chrome. Reusing ${reusedExisting ? reason.replace('-', ' ') : 'a new tab'} for Wellfound.`);
+        await send('▶ Checking Wellfound login...');
+        await workPage.goto('https://wellfound.com', { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+        const isLoggedIn = await workPage.evaluate(() =>
           !document.querySelector('a[href="/login"]') || !!document.querySelector('[class*="avatar"], [class*="profile-menu"], [data-test*="user"]')
         );
         if (!isLoggedIn) {
           await send('⚠ Not logged in to Wellfound — logging in...');
-          await wellfoundLogin(loginPage, email, password);
+          await wellfoundLogin(workPage, email, password);
           await send('✓ Logged in to Wellfound');
         } else {
           await send('✓ Already logged in to Wellfound');
         }
       } else {
         await send('▶ Launched browser. Logging in to Wellfound...');
-        await wellfoundLogin(loginPage, email, password);
+        await wellfoundLogin(workPage, email, password);
         await send('✓ Logged in to Wellfound');
       }
-      await loginPage.close().catch(() => {});
 
       const phases = requestedPhase
         ? WF_SEARCH_PHASES.filter(p => p.id === requestedPhase)
         : WF_SEARCH_PHASES;
-
-      const applyPage = await browser.newPage();
       let totalApplied = 0;
       let totalFailed  = 0;
       const appliedEntries = [];
@@ -71,11 +69,10 @@ export async function POST(request) {
         // Scrape job cards from all search URLs in this phase
         const seenUrls  = new Set();
         const allJobs   = [];
-        const scanPage  = await browser.newPage();
 
         for (const url of phase.urls) {
           await send(`🔍 Scanning: ${url}`);
-          const cards = await scrapeWellfoundJobCards(scanPage, url);
+          const cards = await scrapeWellfoundJobCards(workPage, url);
           await send(`  Found ${cards.length} job cards`);
           for (const card of cards) {
             const key = (card.applyUrl || card.cardUrl || '').split('?')[0];
@@ -84,7 +81,6 @@ export async function POST(request) {
             allJobs.push({ ...card, phase: phase.id });
           }
         }
-        await scanPage.close().catch(() => {});
         await send(`ℹ ${allJobs.length} unique jobs found in this phase`);
 
         if (!allJobs.length) {
@@ -98,9 +94,8 @@ export async function POST(request) {
           await send(`⚡ Applying: ${label}...`);
 
           const result = await applyToWellfoundJob(
-            applyPage,
+            workPage,
             job,
-            phase.id,
             (msg) => send(msg)
           );
 

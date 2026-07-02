@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
-import { getBrowser } from '@/lib/browser';
+import { getBrowser, getReusablePage } from '@/lib/browser';
 
 export async function POST(request) {
   const email    = process.env.NAUKRI_EMAIL;
@@ -44,19 +44,22 @@ export async function POST(request) {
         return;
       }
 
-      ({ browser, connected } = await getBrowser({ headless: false }));
+      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: true }));
+      const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
+        hosts: ['naukri.com'],
+      });
 
       if (connected) {
-        await send(`▶ Connected to your existing Chrome. Found ${targets.length} Naukri job(s) — no login needed.`);
+        await send(`▶ Connected to your existing Chrome. Reusing ${reusedExisting ? reason.replace('-', ' ') : 'a new tab'} for Naukri.`);
+        await send(`▶ Found ${targets.length} Naukri job(s) — no login needed.`);
       } else {
         await send(`▶ Launched browser. Found ${targets.length} unique Naukri job(s). Logging in...`);
 
         // Retry login up to 3 times on the same tab
         let loginSuccess = false;
-        const loginPage = await browser.newPage();
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            await naukriLogin(loginPage, email, password);
+            await naukriLogin(workPage, email, password);
             await send(`✓ Logged in to Naukri`);
             loginSuccess = true;
             break;
@@ -69,7 +72,7 @@ export async function POST(request) {
               await send('⏳ Please log in to Naukri manually in the open browser tab. Waiting 30s...');
               await new Promise(r => setTimeout(r, 30000));
               // Check if user logged in manually
-              const manuallyLoggedIn = await loginPage.evaluate(() =>
+              const manuallyLoggedIn = await workPage.evaluate(() =>
                 !(document.querySelector('#usernameField') || document.querySelector('#passwordField'))
               ).catch(() => false);
               if (manuallyLoggedIn) {
@@ -79,7 +82,6 @@ export async function POST(request) {
             }
           }
         }
-        await loginPage.close().catch(() => {});
 
         if (!loginSuccess) {
           await send('FATAL: Could not log in. Browser left open — log in manually and click Easy Apply again.');
@@ -92,12 +94,11 @@ export async function POST(request) {
       let failed  = 0;
       const appliedEntries = [];
       const skippedEntries = [];
-      const applyPage = await browser.newPage();
 
       for (const job of targets) {
         const companyName = companyMap[job.companyId] || job.companyId;
         await send(`⚡ Applying: ${job.title} at ${companyName}...`);
-        const result = await naukriEasyApply(applyPage, job);
+        const result = await naukriEasyApply(workPage, job);
 
         if (result.success) {
           applied++;

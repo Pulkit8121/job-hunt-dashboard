@@ -219,20 +219,97 @@ export async function scrapeWellfoundJobCards(page, url) {
   });
 }
 
+async function extractWellfoundApplyContext(page, fallbackJob = {}) {
+  return page.evaluate((fallback) => {
+    const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+
+    const company = clean(
+      document.querySelector('[class*="company"], [class*="startup"], [data-test*="company"], h2, h3')?.textContent
+    ) || fallback.company || '';
+
+    const title = clean(
+      document.querySelector('h1, [class*="title"], [class*="role"], [data-test*="title"]')?.textContent
+    ) || fallback.title || '';
+
+    const descCandidates = Array.from(document.querySelectorAll('section, article, div, p, li'))
+      .map(el => clean(el.textContent))
+      .filter(text =>
+        text.length > 120 &&
+        /responsibil|requirement|qualif|about the role|about us|what you.ll do|you will|experience/i.test(text)
+      )
+      .sort((a, b) => b.length - a.length);
+
+    const description = (descCandidates[0] || fallback.description || '').slice(0, 3500);
+
+    const textareas = Array.from(document.querySelectorAll('textarea'))
+      .filter(el => el.offsetParent !== null)
+      .map((textarea, index) => {
+        let question = '';
+        if (textarea.id) {
+          question = clean(document.querySelector(`label[for="${textarea.id}"]`)?.textContent);
+        }
+        if (!question) {
+          question = clean(textarea.getAttribute('aria-label'));
+        }
+        if (!question) {
+          question = clean(textarea.getAttribute('placeholder'));
+        }
+        if (!question) {
+          const container = textarea.closest('form, [class*="field"], [class*="question"], [class*="input"], [class*="application"]');
+          question = clean(
+            container?.querySelector('label, h1, h2, h3, h4, p, span, strong')?.textContent
+          );
+        }
+
+        return {
+          index,
+          question: question || `Written response ${index + 1}`,
+        };
+      });
+
+    return {
+      title,
+      company,
+      description,
+      question: textareas[0]?.question || '',
+      textareas,
+    };
+  }, fallbackJob);
+}
+
 // ── Generate AI cover letter ──────────────────────────────────────────────────
-export async function generateCoverLetter(job) {
-  const prompt = `Write a short Wellfound application "Note" (100-140 words, direct and enthusiastic).
+export async function generateCoverLetter(job, questionPrompt = '') {
+  const normalizedQuestion = questionPrompt || 'Cover letter';
+  const isCompanyFocusedQuestion = /what interests you about working for this company|why (do you want to work|this company)|why us|why are you interested in (this|our) company|interests you about (the|this) company/i
+    .test(normalizedQuestion);
+  const responseGoal = isCompanyFocusedQuestion
+    ? 'Make the answer primarily about the company: its mission, product, stage, team, engineering culture, or problem space based on the job description and page context. Mention the role only secondarily.'
+    : 'Make the answer primarily about fit for the role, using the company and job description to stay specific.';
+  const prompt = `Write a tailored Wellfound application response in first person.
 
-Job: ${job.title} at ${job.company || 'a startup'}
-Description hint: ${(job.description || 'Software engineering role').slice(0, 300)}
+Application field/question: ${normalizedQuestion}
+Job title: ${job.title}
+Company: ${job.company || 'a startup'}
+Job description:
+${(job.description || 'Software engineering role').slice(0, 2200)}
 
-About me (Pulkit Agarwal):
-- Full-Stack Developer, 2 years professional / 4 years in tech
-- Currently at Magna International: GoLang microservices, OIDC/RBAC, Docker, Kubernetes
-- Also built: React.js/Next.js/Vue.js apps, Node.js/Express APIs, MongoDB/Redis, AI integrations
-- BTech CSE, CGPA 8.96, based in Bengaluru
+Candidate profile:
+- Pulkit Agarwal
+- Backend-leaning software engineer focused on systems and product delivery
+- 2 years professional experience, 4 years total hands-on building
+- Magna International: designed and shipped Go microservices, auth/identity flows with OIDC/RBAC, and production deployments using Docker and Kubernetes
+- Built backend services, APIs, async flows, caching, and full-stack features with Node.js, Express, React, Next.js, MongoDB, Redis, and AI-powered workflows
+- Bengaluru based
 
-Write in first person. Be specific to the role/company. No greeting/header. Start directly with content. Max 140 words.`;
+Requirements:
+- Be specific to the company and role using the provided job description
+- Answer the actual application field/question, especially if it asks "What interests you about working for this company?"
+- ${responseGoal}
+- Keep it concise: 90-140 words
+- No greeting or sign-off
+- Emphasize architecture, system design, microservices, APIs, reliability, scalability, and ownership where relevant
+- Do not mention CGPA, BTech, grades, or academics unless the job description explicitly requires it
+- Sound human, direct, and thoughtful`;
 
   try {
     const geminiKey = process.env.GEMINI_API_KEY;
@@ -275,7 +352,46 @@ Write in first person. Be specific to the role/company. No greeting/header. Star
     }
   } catch {}
 
-  return `Excited to apply for ${job.title} at ${job.company || 'your company'}. I'm a Full-Stack Developer with 2 years of professional experience and 4 years in tech. At Magna International I built GoLang microservices, OIDC/RBAC auth systems, and Docker/K8s deployments for enterprise clients. Previously at Cadera Infotech I built full-stack SaaS platforms using React.js, Next.js, Node.js, and MongoDB, including AI-powered workflows. I love owning features end-to-end and move fast without sacrificing quality. Would be a great fit for your team.`;
+  if (isCompanyFocusedQuestion) {
+    return `What interests me most about ${job.company || 'your company'} is the opportunity to work close to the product and the core problems the team is solving, rather than being far from impact. I’m drawn to companies where engineering quality matters because it directly shapes the user experience and the pace of the business. From the role, it seems the team values thoughtful backend design, scalable systems, and engineers who can own problems end to end. That combination is especially appealing to me because my strongest work has been around building microservices, shaping APIs, and improving reliability and architecture while still staying practical and product-focused.`;
+  }
+
+  return `What stands out to me about ${job.company || 'your company'} is the chance to work on meaningful engineering problems with real product impact. The role feels close to the work I enjoy most: designing backend services, building microservice-driven systems, shaping clean APIs, and thinking through reliability and scale instead of only implementing isolated features. In my current work I’ve built Go microservices, worked on OIDC/RBAC-based architecture, and shipped containerized services on Docker and Kubernetes, so I’d bring both hands-on execution and a strong systems mindset. I’m especially drawn to teams where engineers can own architecture decisions, move quickly, and help improve the product end to end.`;
+}
+
+async function fillWellfoundWrittenQuestions(page, enrichedJob, onProgress) {
+  const fields = enrichedJob.textareas?.length
+    ? enrichedJob.textareas
+    : [{ index: 0, question: enrichedJob.question || 'Cover letter' }];
+
+  const responses = [];
+
+  for (const field of fields) {
+    const question = field.question || `Written response ${field.index + 1}`;
+    const response = await generateCoverLetter(enrichedJob, question);
+
+    const filled = await page.evaluate(({ index, text }) => {
+      const visibleTextareas = Array.from(document.querySelectorAll('textarea'))
+        .filter(el => el.offsetParent !== null);
+      const ta = visibleTextareas[index];
+      if (!ta) return false;
+
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (desc?.set) desc.set.call(ta, text); else ta.value = text;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      ta.dispatchEvent(new Event('change', { bubbles: true }));
+      ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      return true;
+    }, { index: field.index, text: response });
+
+    if (filled) {
+      responses.push({ question, response });
+      onProgress?.(`  ✍ Filled: ${question.slice(0, 70)}`);
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  return responses;
 }
 
 // ── Apply to a single Wellfound job ──────────────────────────────────────────
@@ -317,37 +433,13 @@ export async function applyToWellfoundJob(page, job, onProgress) {
     });
     await new Promise(r => setTimeout(r, 2000));
 
-    // Generate cover letter
-    const coverLetter = await generateCoverLetter(job);
-
-    // Fill "Note" textarea — Wellfound's single apply field
-    const noteFilled = await page.evaluate((cl) => {
-      const selectors = [
-        'textarea[placeholder*="note" i]',
-        'textarea[placeholder*="cover" i]',
-        'textarea[placeholder*="introduce" i]',
-        'textarea[placeholder*="tell" i]',
-        'textarea[placeholder*="why" i]',
-        'textarea[aria-label*="note" i]',
-        'textarea[name*="note"]',
-        'textarea[name*="cover"]',
-        'textarea',
-      ];
-      for (const sel of selectors) {
-        const ta = document.querySelector(sel);
-        if (ta && ta.offsetParent !== null) {
-          const desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-          if (desc?.set) desc.set.call(ta, cl); else ta.value = cl;
-          ta.dispatchEvent(new Event('input',  { bubbles: true }));
-          ta.dispatchEvent(new Event('change', { bubbles: true }));
-          ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-          return true;
-        }
-      }
-      return false;
-    }, coverLetter);
-
-    if (noteFilled) onProgress?.(`  ✍ Cover letter filled`);
+    const enrichedJob = {
+      ...job,
+      ...(await extractWellfoundApplyContext(page, job)),
+    };
+    onProgress?.(`  🧠 Tailoring response for ${enrichedJob.company || job.company || 'company'}`);
+    const responses = await fillWellfoundWrittenQuestions(page, enrichedJob, onProgress);
+    if (!responses.length) return { success: false, reason: 'Written response field not found' };
     await new Promise(r => setTimeout(r, 800));
 
     // Click "Send Application" — confirmed submit text per research
@@ -378,7 +470,7 @@ export async function applyToWellfoundJob(page, job, onProgress) {
     return {
       success: true,
       reason: success ? 'Application submitted' : 'Submitted (verify on Wellfound)',
-      coverLetter,
+      coverLetter: responses[0]?.response || '',
     };
   } catch (e) {
     return { success: false, reason: (e.message || 'Unknown error').slice(0, 120) };
