@@ -2,6 +2,8 @@
 // Three phases: India (any mode) → Remote outside India → Onsite outside India (with sponsorship)
 // Apply flow: single-click → optional "Note" textarea → "Send Application" button
 
+import { isExcludedCompany } from './exclusions.js';
+
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── Anti-detection setup for each page ───────────────────────────────────────
@@ -733,6 +735,15 @@ export async function applyToWellfoundJob(page, job, onProgress) {
       document.title.includes('Just a moment') || document.title.includes('Access denied')
     );
     if (blocked) return { success: false, reason: 'Cloudflare block — use existing Chrome session' };
+
+    // Safety net: re-check the excluded-client list against the company name shown
+    // on the actual job page (the search card's company field is sometimes blank).
+    const pageCompany = await page.evaluate(() =>
+      (document.querySelector('[class*="company"], [class*="startup"], [data-test*="company"], h2, h3')?.textContent || '').trim()
+    );
+    if (isExcludedCompany(pageCompany) || isExcludedCompany(job.company)) {
+      return { success: false, reason: `Excluded client (${pageCompany || job.company})` };
+    }
 
     // Check already applied
     const alreadyApplied = await page.evaluate(() =>

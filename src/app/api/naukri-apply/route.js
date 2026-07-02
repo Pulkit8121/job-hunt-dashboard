@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
 import { getBrowser, getReusablePage } from '@/lib/browser';
+import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 
 export async function POST(request) {
   const email    = process.env.NAUKRI_EMAIL;
@@ -26,17 +27,27 @@ export async function POST(request) {
       // Load permanently skipped links (company website, no button, etc.)
       const skippedLinks = await readSkippedLinks();
 
-      // All jobs with a naukri.com link — deduplicated and excluding already-skipped
+      // Freelance-client companies to never apply to
+      const excluded = getExcludedCompanies();
+      let excludedCount = 0;
+
+      // All jobs with a naukri.com link — deduplicated, excluding already-skipped
+      // and excluding freelance-client companies (matched by company name).
       const seenLinks = new Set();
       const targets = allJobs.filter(j => {
         if (!j.link?.includes('naukri.com')) return false;
         const key = j.link.split('?')[0];
         if (seenLinks.has(key) || skippedLinks.has(key)) return false;
+        const companyName = companyMap[j.companyId] || j.companyId || '';
+        if (isExcludedCompany(companyName, excluded) || isExcludedCompany(j.title, excluded)) {
+          excludedCount++;
+          return false;
+        }
         seenLinks.add(key);
         return true;
       });
 
-      await send(`ℹ ${skippedLinks.size} previously skipped jobs excluded. ${targets.length} remaining to attempt.`);
+      await send(`ℹ ${skippedLinks.size} previously skipped + ${excludedCount} excluded-client jobs removed. ${targets.length} remaining to attempt.`);
 
       if (!targets.length) {
         await send('⚠ No Naukri jobs found. Click "Refresh All" or "Agent Scan" first, then retry.');
@@ -44,7 +55,11 @@ export async function POST(request) {
         return;
       }
 
-      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: true }));
+      // On the server (no display) set APPLY_HEADLESS=true so Naukri launches its
+      // own headless Chrome and logs in with credentials. Locally, leave it unset
+      // to attach to your visible Chrome on :9222 (or launch a visible window).
+      const headless = process.env.APPLY_HEADLESS === 'true';
+      ({ browser, connected } = await getBrowser({ headless, requireConnected: false }));
       const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
         hosts: ['naukri.com'],
       });

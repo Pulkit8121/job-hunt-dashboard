@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { getBrowser, getReusablePage } from '@/lib/browser';
 import { recordApplied } from '@/lib/db';
+import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import {
   wellfoundLogin,
   scrapeWellfoundJobCards,
@@ -66,6 +67,7 @@ export async function POST(request) {
       const phases = requestedPhase
         ? WF_SEARCH_PHASES.filter(p => p.id === requestedPhase)
         : WF_SEARCH_PHASES;
+      const excluded = getExcludedCompanies();
       let totalApplied = 0;
       let totalFailed  = 0;
       const appliedEntries = [];
@@ -84,6 +86,13 @@ export async function POST(request) {
           for (const card of cards) {
             const key = (card.applyUrl || card.cardUrl || '').split('?')[0];
             if (!key || seenUrls.has(key)) continue;
+            // Skip freelance-client companies (Drytis / Dofin) — don't reveal
+            // current employer to a company Pulkit already works with.
+            if (isExcludedCompany(card.company, excluded) || isExcludedCompany(card.title, excluded)) {
+              seenUrls.add(key);
+              await send(`  ⊘ Skipping excluded client: ${card.company || card.title}`);
+              continue;
+            }
             seenUrls.add(key);
             allJobs.push({ ...card, phase: phase.id });
           }
