@@ -7,6 +7,7 @@ import {
   wellfoundLogin,
   scrapeWellfoundJobCards,
   applyToWellfoundJob,
+  setupWellfoundProfile,
   WF_SEARCH_PHASES,
   WF_PROFILE,
 } from '@/lib/wellfound';
@@ -55,6 +56,12 @@ export async function POST(request) {
         await wellfoundLogin(workPage, email, password);
         await send('✓ Logged in to Wellfound');
       }
+
+      // One-time profile setup — LinkedIn/GitHub/portfolio and work-authorization
+      // preferences live on Wellfound's profile pages, not in the per-job apply
+      // modal, so this only needs to run once per session.
+      await send('▶ Checking Wellfound profile (LinkedIn/GitHub/work authorization)...');
+      await setupWellfoundProfile(workPage, (msg) => send(msg));
 
       const phases = requestedPhase
         ? WF_SEARCH_PHASES.filter(p => p.id === requestedPhase)

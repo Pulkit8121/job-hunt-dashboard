@@ -1,9 +1,61 @@
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// Naukri's Apply buttons and job-tuple links frequently carry target="_blank" or
+// call window.open() — over hundreds of applications this opens hundreds of
+// untracked Chrome tabs and grinds the browser to a halt. This forces same-tab
+// navigation instead. Installed once per page via evaluateOnNewDocument so it
+// survives every future navigation without re-registering (which would stack
+// MutationObservers across hundreds of job applications).
+async function neutralizeNewTabs(page) {
+  await page.evaluateOnNewDocument(() => {
+    window.open = function (url) {
+      if (url) window.location.href = url;
+      return window;
+    };
+    function stripBlankTargets(root) {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
+    }
+    stripBlankTargets(document);
+    const start = () => {
+      stripBlankTargets(document);
+      new MutationObserver(() => stripBlankTargets(document))
+        .observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.body) start();
+    else document.addEventListener('DOMContentLoaded', start);
+  });
+}
+
+// Closes any browser tabs that appear DURING fn() and weren't open before it —
+// scoped tightly (only naukri.com / about:blank tabs, never pre-existing tabs)
+// so it can't accidentally close the user's own unrelated browsing tabs when
+// running against their real, already-open Chrome session.
+async function withTabCleanup(page, fn) {
+  const browser = page.browser();
+  const before = new Set(await browser.pages());
+  try {
+    return await fn();
+  } finally {
+    const after = await browser.pages();
+    for (const p of after) {
+      if (before.has(p) || p === page) continue;
+      const url = p.url();
+      if (url.includes('naukri.com') || url === 'about:blank') {
+        await p.close().catch(() => {});
+      }
+    }
+  }
+}
+
 export async function prepareNaukriPage(page) {
   await page.setUserAgent(USER_AGENT);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  if (!page.__naukriTabsNeutralized) {
+    await neutralizeNewTabs(page);
+    page.__naukriTabsNeutralized = true;
+  }
 }
 
 export async function openNaukriPage(page, url) {
@@ -527,7 +579,10 @@ export async function naukriEasyApply(page, job) {
 
     // Click the Apply button — most reliable: text XPath equivalent
     // Confirmed from multiple GitHub repos: text()='Apply' is stable across Naukri deploys
-    const clicked = await page.evaluate(() => {
+    // Wrapped in withTabCleanup: some Apply buttons ignore the window.open override
+    // (e.g. real target="_blank" anchors added after the page loaded) and still
+    // spawn a stray tab — close it immediately rather than let it accumulate.
+    const clicked = await withTabCleanup(page, () => page.evaluate(() => {
       // Primary: find by exact text 'Apply' or 'Easy Apply' (XPath-style text match)
       const allEls = Array.from(document.querySelectorAll('button, a, [class*="applyBtn"], [class*="apply-btn"]'));
       const SKIP = ['company website', 'company site', 'external', 'login', 'register', 'sign in'];
@@ -546,7 +601,7 @@ export async function naukriEasyApply(page, job) {
         if (TARGET.some(p => t.startsWith(p))) { el.click(); return t; }
       }
       return null;
-    });
+    }));
     if (!clicked) return { success: false, reason: 'No Apply button found' };
 
     // Wait for chatbot / form to open
@@ -567,7 +622,7 @@ export async function naukriEasyApply(page, job) {
 
       await new Promise(r => setTimeout(r, 1200));
 
-      const action = await answerChatbotTurn(page, PROFILE_ANSWERS);
+      const action = await withTabCleanup(page, () => answerChatbotTurn(page, PROFILE_ANSWERS));
 
       if (action === 'none') {
         if (lastAction === 'none') break; // two consecutive nones = stuck
