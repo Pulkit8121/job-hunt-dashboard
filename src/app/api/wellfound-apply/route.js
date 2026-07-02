@@ -34,41 +34,60 @@ export async function POST(request) {
       }
 
       // Wellfound is protected by Cloudflare/DataDome, which hard-blocks datacenter
-      // IPs (verified: the server only ever gets the CF challenge page, never the
-      // login form). So Wellfound cannot run on the server — bail out with a clear
-      // instruction instead of the confusing ":9222 attach failed" error.
-      if (process.env.APPLY_HEADLESS === 'true') {
-        await send('⛔ Wellfound can\'t run on the server — Cloudflare blocks datacenter IPs.');
-        await send('▶ Run Wellfound from your LOCAL machine: `npm run dev` then click "Apply All Wellfound Jobs" on localhost. A browser window will open for you to sign in once.');
-        await send('DONE: Wellfound skipped on server. Use the local dashboard for Wellfound; the prod link is for Naukri.');
-        await writer.close().catch(() => {});
-        return;
+      // IPs — automated login from the server just gets the challenge page. The
+      // workaround: a headful Chrome runs on the server's virtual display (started
+      // by /usr/local/bin/wf-browser.sh, viewable over the password-protected noVNC
+      // screen). You clear Cloudflare + sign in there ONCE, and the bot attaches to
+      // that same authenticated session over the local DevTools port (9222).
+      const onServer = process.env.APPLY_HEADLESS === 'true';
+
+      try {
+        // On the server, require the VNC Chrome on :9222. Locally, attach to your
+        // Chrome on :9222 if present, otherwise launch a visible window.
+        ({ browser, connected } = await getBrowser({ headless: false, requireConnected: onServer }));
+      } catch (e) {
+        if (onServer) {
+          await send('⛔ No Wellfound browser session found on the server.');
+          await send('▶ Start it: SSH in and run `/usr/local/bin/wf-browser.sh`');
+          await send('▶ Then open the noVNC screen (http://187.127.188.153:6080/vnc.html), sign into Wellfound (clear the Cloudflare check), and click Apply again.');
+          await send('DONE: Waiting for the VNC browser + your Wellfound login.');
+          await writer.close().catch(() => {});
+          return;
+        }
+        throw e;
       }
 
-      // Locally: attach to your visible Chrome on :9222 if it's running, otherwise
-      // launch a fresh visible window (requireConnected:false) so you can sign in
-      // and clear any Cloudflare challenge yourself — no debug-port setup needed.
-      ({ browser, connected } = await getBrowser({ headless: false, requireConnected: false }));
       const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
         hosts: ['wellfound.com'],
       });
 
-      if (connected) {
-        await send(`▶ Connected to your existing Chrome. Reusing ${reusedExisting ? reason.replace('-', ' ') : 'a new tab'} for Wellfound.`);
-        await send('▶ Checking Wellfound login...');
-        await workPage.goto('https://wellfound.com', { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-        const isLoggedIn = await workPage.evaluate(() =>
-          !document.querySelector('a[href="/login"]') || !!document.querySelector('[class*="avatar"], [class*="profile-menu"], [data-test*="user"]')
-        );
-        if (!isLoggedIn) {
-          await send('⚠ Not logged in to Wellfound — logging in...');
-          await wellfoundLogin(workPage, email, password);
-          await send('✓ Logged in to Wellfound');
-        } else {
-          await send('✓ Already logged in to Wellfound');
-        }
+      // Verify we're actually logged in (you sign in manually via noVNC on the
+      // server; locally the bot can log in itself since your home IP isn't blocked).
+      await workPage.goto('https://wellfound.com', { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+      const loginState = await workPage.evaluate(() => {
+        const onChallenge = /just a moment|attention required|verify you are human/i.test(document.title + ' ' + (document.body?.innerText || '').slice(0, 200));
+        const loggedIn = !document.querySelector('a[href="/login"]') || !!document.querySelector('[class*="avatar"], [class*="profile-menu"], [data-test*="user"]');
+        return { onChallenge, loggedIn };
+      });
+
+      if (loginState.onChallenge) {
+        await send('⚠ Cloudflare challenge is showing in the server browser.');
+        await send('▶ Open http://187.127.188.153:6080/vnc.html, solve the check, sign into Wellfound, then click Apply again.');
+        await send('DONE: Waiting for you to clear Cloudflare + log in via noVNC.');
+        await writer.close().catch(() => {});
+        return;
+      }
+
+      if (loginState.loggedIn) {
+        await send(`✓ Using logged-in Wellfound session${connected ? ` (attached to ${reusedExisting ? reason.replace('-', ' ') : 'the VNC browser'})` : ''}.`);
+      } else if (onServer) {
+        await send('⚠ Not logged into Wellfound in the server browser.');
+        await send('▶ Open http://187.127.188.153:6080/vnc.html, sign in, then click Apply again.');
+        await send('DONE: Waiting for your Wellfound login via noVNC.');
+        await writer.close().catch(() => {});
+        return;
       } else {
-        await send('▶ Launched browser. Logging in to Wellfound...');
+        await send('▶ Not logged in — logging in locally...');
         await wellfoundLogin(workPage, email, password);
         await send('✓ Logged in to Wellfound');
       }
