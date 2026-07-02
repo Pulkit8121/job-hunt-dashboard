@@ -89,6 +89,10 @@ export default function Dashboard() {
   async function handleRefreshCompany(id)    { await streamScrape('/api/scrape', { companyId:id, bust:true }, `Scanning ${id}...`); await load(); }
   async function handleDiscover()            { setDiscovering(true);  try { await streamScrape('/api/discover',         {},                   'Auto-adding companies from Naukri...'); } finally { setDiscovering(false); } }
   async function handleEasyApplyAll()        { setEasyApplying(true); try { await streamScrape('/api/naukri-apply',    {},                   'Naukri Easy Apply — opening browser...'); } finally { setEasyApplying(false); await load(); } }
+  async function handleStopNaukri() {
+    addLog('⏹ Stopping Naukri apply...');
+    try { await fetch('/api/naukri-apply/stop', { method: 'POST' }); } catch {}
+  }
   async function handleLiScrape()            { setLiScraping(true);   try { await streamScrape('/api/linkedin-scrape', { companyId:'all' },  'Scraping LinkedIn people...'); }          finally { setLiScraping(false); await load(); } }
   async function handleLiConnect()           { setLiConnecting(true); try { await streamScrape('/api/linkedin-connect',{ limit:20 },         'Sending LinkedIn connection requests...'); } finally { setLiConnecting(false); await load(); } }
   async function handleWellfoundApply(phase) { setWfApplying(true);   try { await streamScrape('/api/wellfound-apply', phase === 'all' ? {} : { phase }, `Wellfound Apply — ${phase === 'all' ? 'all phases' : phase}...`); } finally { setWfApplying(false); await load(); } }
@@ -222,6 +226,15 @@ export default function Dashboard() {
               {easyApplying ? 'Applying...' : `Easy Apply${easyApplyCount > 0 ? ` (${easyApplyCount})` : ''}`}
             </button>
 
+            {easyApplying && (
+              <button onClick={handleStopNaukri}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-900/50 hover:bg-red-800/60
+                  text-xs text-red-100 border border-red-700/50 transition-colors"
+                title="Stop the running Naukri apply">
+                <X size={12} /> Stop
+              </button>
+            )}
+
             <button onClick={handleApplyBoth} disabled={scanBusy || easyApplying || wfApplying}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-fuchsia-900/50 hover:bg-fuchsia-800/60
                 text-xs text-fuchsia-100 border border-fuchsia-700/50 transition-colors disabled:opacity-40"
@@ -302,13 +315,22 @@ export default function Dashboard() {
                 Applies to every Naukri job in your dashboard. Answers chatbot questions automatically. Skips company-website jobs and saves their real URLs. Already-skipped jobs are excluded — only fresh jobs are attempted each run.
               </p>
             </div>
-            <button onClick={handleEasyApplyAll} disabled={busy}
-              className="shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-xl
-                bg-yellow-500 hover:bg-yellow-400 active:bg-yellow-600
-                text-black font-bold text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg">
-              <Send size={14} className={easyApplying ? 'animate-pulse' : ''} />
-              {easyApplying ? 'Applying to all Naukri jobs...' : 'Apply All Naukri Jobs'}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button onClick={handleEasyApplyAll} disabled={busy}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl
+                  bg-yellow-500 hover:bg-yellow-400 active:bg-yellow-600
+                  text-black font-bold text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg">
+                <Send size={14} className={easyApplying ? 'animate-pulse' : ''} />
+                {easyApplying ? 'Applying to all Naukri jobs...' : 'Apply All Naukri Jobs'}
+              </button>
+              {easyApplying && (
+                <button onClick={handleStopNaukri}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500
+                    text-white font-bold text-sm transition-colors shadow-lg">
+                  <X size={14} /> Stop
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Wellfound Apply CTA */}

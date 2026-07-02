@@ -536,7 +536,7 @@ async function answerChatbotTurn(page, answers) {
 }
 
 // Attempt Naukri Easy Apply for a single job. Returns { success, reason, externalUrl? }
-export async function naukriEasyApply(page, job) {
+export async function naukriEasyApply(page, job, signal) {
   try {
     await prepareNaukriPage(page);
     await page.goto(job.link, { waitUntil: 'domcontentloaded', timeout: 25000 });
@@ -608,41 +608,72 @@ export async function naukriEasyApply(page, job) {
     }));
     if (!clicked) return { success: false, reason: 'No Apply button found' };
 
-    // Wait for chatbot / form to open
-    await new Promise(r => setTimeout(r, 3000));
+    // Most jobs apply instantly: clicking Apply navigates to a confirmation page
+    // (/myapply/showAcp?...multiApplyResp={id:202}) with no questions. Others open
+    // a chatbot drawer with screening questions. Poll for up to ~10s for whichever
+    // appears — instant-apply success, OR a question panel to answer.
+    const detectState = () => page.evaluate(() => {
+      const url = location.href;
+      const body = document.body.textContent || '';
+      const instantApplied =
+        /\/myapply\/showAcp/i.test(url) ||
+        /multiApplyResp/i.test(url) ||
+        /(successfully applied|application submitted|you have applied|applied successfully|thank you for applying)/i.test(body);
+      const hasChatbot =
+        !!document.querySelector('ul[id*="chatList_"]') ||
+        document.querySelectorAll('.ssrc__radio-btn-container').length > 0 ||
+        !!document.querySelector('div.textArea') ||
+        !!document.querySelector('[class*="chatbot"], [class*="Chatbot"], [class*="chatBot"]');
+      return { instantApplied, hasChatbot };
+    });
+
+    let sawChatbot = false;
+    for (let i = 0; i < 6; i++) {
+      if (signal?.aborted) return { success: false, reason: 'Stopped by user' };
+      const s = await detectState();
+      if (s.hasChatbot) { sawChatbot = true; break; }
+      if (s.instantApplied) return { success: true, reason: 'Applied (instant)' };
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
+    if (!sawChatbot) {
+      // No chatbot and no explicit success signal — re-check once more, then treat
+      // as applied (Naukri often confirms via a toast that's already gone).
+      const s = await detectState();
+      if (s.instantApplied) return { success: true, reason: 'Applied (instant)' };
+      return { success: true, reason: 'Submitted (verify on Naukri profile)' };
+    }
 
     // ── Chatbot conversation loop (up to 25 turns) ───────────────────────────────
     let turns = 0;
-    let lastAction = '';
+    let noneStreak = 0;
     while (turns < 25) {
+      if (signal?.aborted) return { success: false, reason: 'Stopped by user' };
       turns++;
 
-      // Check for success at any point
-      const done = await page.evaluate(() =>
-        /(successfully applied|application submitted|you have applied|applied successfully|thank you for applying)/i
-          .test(document.body.textContent)
-      );
-      if (done) return { success: true, reason: 'Applied successfully' };
+      const s = await detectState();
+      if (s.instantApplied) return { success: true, reason: 'Applied via chatbot' };
 
-      await new Promise(r => setTimeout(r, 1200));
+      await new Promise(r => setTimeout(r, 1000));
 
       const action = await withTabCleanup(page, () => answerChatbotTurn(page, PROFILE_ANSWERS));
 
       if (action === 'none') {
-        if (lastAction === 'none') break; // two consecutive nones = stuck
+        noneStreak++;
+        // Give the drawer extra time before giving up — questions can lag behind
+        // the previous answer's animation.
+        if (noneStreak >= 3) break;
+        await new Promise(r => setTimeout(r, 1500));
+      } else {
+        noneStreak = 0;
       }
-      lastAction = action;
 
-      // Small pause after each chatbot interaction to let next question load
       await new Promise(r => setTimeout(r, 1000));
     }
 
     // Final success check
-    const finalSuccess = await page.evaluate(() =>
-      /(successfully applied|application submitted|you have applied|applied successfully|thank you for applying)/i
-        .test(document.body.textContent)
-    );
-    if (finalSuccess) return { success: true, reason: 'Applied successfully' };
+    const finalState = await detectState();
+    if (finalState.instantApplied) return { success: true, reason: 'Applied via chatbot' };
     return { success: true, reason: 'Submitted (verify on Naukri profile)' };
   } catch (e) {
     return { success: false, reason: e.message };

@@ -5,6 +5,7 @@ import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readS
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
 import { getBrowser, getReusablePage } from '@/lib/browser';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
+import { startRun, finishRun, isRunning } from '@/lib/naukriRunState';
 
 export async function POST(request) {
   const email    = process.env.NAUKRI_EMAIL;
@@ -14,6 +15,17 @@ export async function POST(request) {
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
   const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`));
+
+  if (isRunning()) {
+    await send('⚠ A Naukri apply run is already in progress. Stop it first if you want to restart.');
+    await writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+    });
+  }
+
+  const controller = startRun();
+  const signal = controller.signal;
 
   (async () => {
     let browser;
@@ -111,9 +123,14 @@ export async function POST(request) {
       const skippedEntries = [];
 
       for (const job of targets) {
+        if (signal.aborted) {
+          await send('⏹ Stopped by user.');
+          break;
+        }
+
         const companyName = companyMap[job.companyId] || job.companyId;
         await send(`⚡ Applying: ${job.title} at ${companyName}...`);
-        const result = await naukriEasyApply(workPage, job);
+        const result = await naukriEasyApply(workPage, job, signal);
 
         if (result.success) {
           applied++;
@@ -159,17 +176,26 @@ export async function POST(request) {
           await send(`💾 Checkpoint: ${applied} applied, ${failed} skipped so far`);
         }
 
+        if (signal.aborted) {
+          await send('⏹ Stopped by user.');
+          break;
+        }
         await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
       }
 
       if (appliedEntries.length) await recordApplied(appliedEntries);
       if (skippedEntries.length) await recordSkipped(skippedEntries);
-      await send(`DONE: Applied to ${applied} jobs. ${failed} skipped/saved. Next run will skip those ${failed} automatically.`);
+      if (signal.aborted) {
+        await send(`STOPPED: Applied to ${applied} jobs before stopping. ${failed} skipped/saved.`);
+      } else {
+        await send(`DONE: Applied to ${applied} jobs. ${failed} skipped/saved. Next run will skip those ${failed} automatically.`);
+      }
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
       // Only close a browser we launched ourselves — never kill user's existing Chrome
       if (browser && !connected) await browser.close().catch(() => {});
+      finishRun();
       await writer.close().catch(() => {});
     }
   })();
