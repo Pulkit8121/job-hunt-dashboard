@@ -1,0 +1,39 @@
+name: Deploy to server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy over SSH
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            'set -e
+             export PATH="$PATH:/usr/bin:/usr/local/bin"
+             cd /var/www/job-hunt-dashboard
+             git fetch origin main
+             git reset --hard origin/main
+             npm ci
+             npm run build
+             pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js
+             pm2 save'
+
+      - name: Cleanup key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
