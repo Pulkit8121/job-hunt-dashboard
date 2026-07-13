@@ -16,8 +16,21 @@ function buildSignature() {
   return `Best regards,\n${PROFILE.name}\n${PROFILE.phone}`;
 }
 
+// Guarantees a paragraph break even if the model ignores the "2 paragraphs"
+// instruction — splits right before the CareerMentorEdu sentence so it's never
+// one wall-of-text block.
+function enforceParagraphBreak(body) {
+  if (/\n\s*\n/.test(body)) return body;
+  const idx = body.indexOf('CareerMentorEdu');
+  if (idx === -1) return body;
+  const boundary = body.lastIndexOf('. ', idx);
+  if (boundary === -1) return body;
+  const splitPoint = boundary + 1;
+  return `${body.slice(0, splitPoint).trim()}\n\n${body.slice(splitPoint).trim()}`;
+}
+
 function wrapBody(body) {
-  return `Hi,\n\n${body.trim()}\n\n${buildSignature()}`;
+  return `Hi,\n\n${enforceParagraphBreak(body.trim())}\n\n${buildSignature()}`;
 }
 
 function buildPrompt(companyName) {
@@ -27,7 +40,8 @@ Candidate background (use this, don't invent anything beyond it):
 ${EXPERIENCE_CONTEXT}
 
 Requirements:
-- 160-220 words, plain text (no markdown, no subject line, no greeting, no sign-off, no placeholders like [Company]).
+- 160-220 words, plain text (no markdown, no bold, no subject line, no greeting, no sign-off, no placeholders like [Company]).
+- Write in EXACTLY 2 paragraphs separated by a blank line — never one big block of text. Paragraph 1: professional experience (Magna International, Cadera Infotech, Foundry Digital). Paragraph 2: the CareerMentorEdu project, the resume mention, and the closing line.
 - Open with a direct, concrete statement of who the candidate is and what they're looking for at "${companyName}" — do NOT invent flattery about the company's "mission", "innovation", "culture", or similar guesses, since there's no real information about them beyond their name. Skip straight to substance.
 - Do NOT state a specific number of years of experience (e.g. "1.9 years") — let the roles and companies speak for themselves instead.
 - Cover ALL FOUR of: the current role at Magna International (RBAC-via-OIDC + bot automation), Cadera Infotech (React.js/Node.js/MongoDB + AI workflows), Foundry Digital — call it out explicitly as a US-based startup — and the CareerMentorEdu project. One or two concrete details per company/project is enough; don't just list job titles with no substance.

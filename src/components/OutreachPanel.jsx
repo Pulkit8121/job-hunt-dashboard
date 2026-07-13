@@ -112,6 +112,8 @@ export default function OutreachPanel({ streamScrape, busy }) {
     total: contacts.length,
     pending: contacts.filter(c => c.status === 'pending').length,
     sent: contacts.filter(c => c.status === 'sent').length,
+    replied: contacts.filter(c => !!c.replyStatus).length,
+    awaitingReply: contacts.filter(c => c.status === 'sent' && !c.replyStatus).length,
     interested: contacts.filter(c => c.replyStatus === 'interested').length,
     rejected: contacts.filter(c => c.replyStatus === 'rejected').length,
   };
@@ -205,6 +207,8 @@ export default function OutreachPanel({ streamScrape, busy }) {
           <Stat label="Contacts" value={stats.total} color="text-sky-300" />
           <Stat label="Pending" value={stats.pending} color="text-gray-300" />
           <Stat label="Sent" value={stats.sent} color="text-blue-300" />
+          <Stat label="Replied" value={stats.replied} color="text-amber-300" />
+          <Stat label="Awaiting" value={stats.awaitingReply} color="text-gray-400" />
           <Stat label="Interested" value={stats.interested} color="text-emerald-300" />
           <Stat label="Rejected" value={stats.rejected} color="text-red-300" />
         </div>
