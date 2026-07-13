@@ -7,8 +7,11 @@ import { sendOutreachEmail, sleep } from '@/lib/mailer';
 import { startRun, finishRun, isRunning } from '@/lib/outreachRunState';
 import { isExcludedOutreachDomain } from '@/lib/exclusions';
 
-const MIN_DELAY_MS = 20000;
-const MAX_DELAY_MS = 45000;
+// Sends are spread across the day by an hourly cron (small batches per run), so
+// the in-run spacing just needs to avoid bursting within a batch — 10-25s is
+// plenty. The real rate limiting is the per-run `limit` + the daily cap.
+const MIN_DELAY_MS = 10000;
+const MAX_DELAY_MS = 25000;
 
 function isToday(date) {
   if (!date) return false;

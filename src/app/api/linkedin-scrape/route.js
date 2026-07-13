@@ -5,9 +5,10 @@ import { readCompanies, savePeople } from '@/lib/db';
 import { getLinkedInPeopleTargets } from '@/lib/linkedin';
 import { linkedInLogin, scrapeLinkedInPeople } from '@/lib/linkedin-scraper';
 import { getBrowser } from '@/lib/browser';
+import { startRun, finishRun, isRunning } from '@/lib/linkedinRunState';
 
 export async function POST(request) {
-  const { companyId } = await request.json().catch(() => ({}));
+  const { companyId, headless } = await request.json().catch(() => ({}));
   const email    = process.env.LINKEDIN_EMAIL;
   const password = process.env.LINKEDIN_PASSWORD;
 
@@ -16,11 +17,26 @@ export async function POST(request) {
   const writer  = stream.writable.getWriter();
   const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`));
 
+  if (isRunning()) {
+    await send('⚠ A LinkedIn automation run is already in progress. Wait for it to finish before starting another.');
+    await writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+    });
+  }
+
+  const controller = startRun();
+  const signal = controller.signal;
+
   (async () => {
     let browser;
     let connected = false;
     try {
-      ({ browser, connected } = await getBrowser({ headless: false }));
+      ({ browser, connected } = await getBrowser({
+        headless: typeof headless === 'boolean'
+          ? headless
+          : process.env.LINKEDIN_HEADLESS === 'true',
+      }));
 
       const companies = await readCompanies();
       const targets = companyId === 'all' || !companyId
@@ -54,6 +70,11 @@ export async function POST(request) {
       let totalFound = 0;
 
       for (const company of targets) {
+        if (signal.aborted) {
+          await send('⏹ LinkedIn scrape stopped.');
+          break;
+        }
+
         const searchTargets = getLinkedInPeopleTargets(company);
         const priority = searchTargets.filter(t =>
           ['talent-acquisition', 'engineering-managers', 'senior-engineers'].includes(t.id)
@@ -63,6 +84,7 @@ export async function POST(request) {
         const people = [];
 
         for (const target of priority) {
+          if (signal.aborted) break;
           try {
             const results = await scrapeLinkedInPeople(page, target.url, (msg) => send(msg));
             for (const person of results) {
@@ -100,6 +122,7 @@ export async function POST(request) {
       await send(`FATAL: ${e.message}`);
     } finally {
       if (browser && !connected) await browser.close().catch(() => {});
+      finishRun();
       await writer.close().catch(() => {});
     }
   })();

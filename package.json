@@ -6,7 +6,8 @@
     "dev": "next dev -p 5173",
     "dev:preview": "next dev -p ${PORT:-5174}",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "cron:daily": "node scripts/run-daily-automation.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

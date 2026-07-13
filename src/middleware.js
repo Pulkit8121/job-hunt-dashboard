@@ -13,6 +13,17 @@ export async function middleware(request) {
     return NextResponse.next();
   }
 
+  // Background cron jobs authenticate with a shared secret header instead of a
+  // login session. Only honored for API routes, and only when CRON_SECRET is set.
+  const cronSecret = process.env.CRON_SECRET;
+  if (
+    pathname.startsWith('/api/') &&
+    cronSecret &&
+    request.headers.get('x-cron-secret') === cronSecret
+  ) {
+    return NextResponse.next();
+  }
+
   const token = request.cookies.get('session')?.value;
   const valid = await verifySession(token, process.env.SESSION_SECRET);
 
