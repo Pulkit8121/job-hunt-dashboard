@@ -4,6 +4,8 @@
 // link or plain-text email address. One best contact per company — not a
 // scrape of every address on the page.
 
+import { isExcludedOutreachDomain } from './exclusions.js';
+
 const UA = 'Mozilla/5.0 (compatible; JobHuntBot/1.0; personal job-search tool)';
 const FETCH_TIMEOUT = 8000;
 
@@ -85,6 +87,8 @@ function candidatePaths(baseUrl) {
 
 // Returns { email, source, confidence } or null.
 export async function findContactForCompany(company) {
+  if (isExcludedOutreachDomain(company.careersUrl)) return null;
+
   let baseUrl = company.careersUrl || null;
   let source = 'careers-page';
 
@@ -92,7 +96,7 @@ export async function findContactForCompany(company) {
     baseUrl = await findCompanyHomepage(company.name);
     source = 'search';
   }
-  if (!baseUrl) return null;
+  if (!baseUrl || isExcludedOutreachDomain(baseUrl)) return null;
 
   const paths = candidatePaths(baseUrl);
   const foundMailtos = [];
@@ -107,12 +111,12 @@ export async function findContactForCompany(company) {
     if (foundMailtos.length) break; // mailto link is a strong enough signal — stop early
   }
 
-  const rankedMailtos = rankEmails(foundMailtos);
+  const rankedMailtos = rankEmails(foundMailtos).filter(e => !isExcludedOutreachDomain(e));
   if (rankedMailtos.length) {
     return { email: rankedMailtos[0], source, confidence: 'high' };
   }
 
-  const rankedPlain = rankEmails(foundPlain);
+  const rankedPlain = rankEmails(foundPlain).filter(e => !isExcludedOutreachDomain(e));
   if (rankedPlain.length) {
     const priority = PRIORITY_PREFIXES.some(p => rankedPlain[0].startsWith(p));
     return { email: rankedPlain[0], source, confidence: priority ? 'medium' : 'low' };

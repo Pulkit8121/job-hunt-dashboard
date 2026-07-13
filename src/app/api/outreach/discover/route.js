@@ -2,7 +2,7 @@ export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
 import { readCompanies, readOutreachContacts, addOutreachContact } from '@/lib/db';
-import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
+import { isExcludedCompany, getExcludedCompanies, isExcludedOutreachCompany, isExcludedOutreachDomain } from '@/lib/exclusions';
 import { findContactForCompany } from '@/lib/outreach-discovery';
 
 const CONCURRENCY = 5;
@@ -36,11 +36,15 @@ export async function POST(request) {
       const excluded = getExcludedCompanies();
 
       const candidates = companies.filter(c =>
-        !alreadyHaveContact.has(c.id) && !isExcludedCompany(c.name, excluded)
+        !alreadyHaveContact.has(c.id) &&
+        !isExcludedCompany(c.name, excluded) &&
+        !isExcludedOutreachCompany(c.name) &&
+        !isExcludedOutreachDomain(c.careersUrl)
       );
+      const blockedCount = companies.length - alreadyHaveContact.size - candidates.length;
 
       const target = Math.min(cap, candidates.length);
-      await send(`ℹ ${companies.length} companies tracked, ${alreadyHaveContact.size} already have a contact. Attempting up to ${candidates.length} companies to find ${target} new contact(s)...`);
+      await send(`ℹ ${companies.length} companies tracked, ${alreadyHaveContact.size} already have a contact, ${blockedCount} blocked (current employer / freelance clients). Attempting up to ${candidates.length} companies to find ${target} new contact(s)...`);
 
       let found = 0;
       let attempted = 0;

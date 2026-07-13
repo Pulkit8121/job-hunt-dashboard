@@ -5,6 +5,7 @@ import { readOutreachContacts, updateOutreachContact } from '@/lib/db';
 import { generateCoverLetter } from '@/lib/cover-letter';
 import { sendOutreachEmail, sleep } from '@/lib/mailer';
 import { startRun, finishRun, isRunning } from '@/lib/outreachRunState';
+import { isExcludedOutreachDomain } from '@/lib/exclusions';
 
 const MIN_DELAY_MS = 20000;
 const MAX_DELAY_MS = 45000;
@@ -61,6 +62,12 @@ export async function POST(request) {
         if (signal.aborted) {
           await send('⏹ Stopped by user.');
           break;
+        }
+
+        if (isExcludedOutreachDomain(contact.email)) {
+          await updateOutreachContact(contact.email, { status: 'skipped' });
+          await send(`○ Skipped ${contact.companyName} (${contact.email}) — blocked domain (current employer / freelance client).`);
+          continue;
         }
 
         try {
