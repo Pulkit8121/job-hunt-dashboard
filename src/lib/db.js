@@ -98,11 +98,27 @@ const SkippedJobSchema = new mongoose.Schema({
   skippedAt: { type: Date, default: Date.now },
 });
 
-const Company       = mongoose.models.Company       || mongoose.model('Company',       CompanySchema);
-const Job           = mongoose.models.Job           || mongoose.model('Job',           JobSchema);
-const LinkedInPerson= mongoose.models.LinkedInPerson|| mongoose.model('LinkedInPerson',LinkedInPersonSchema);
-const AppliedJob    = mongoose.models.AppliedJob    || mongoose.model('AppliedJob',    AppliedJobSchema);
-const SkippedJob    = mongoose.models.SkippedJob    || mongoose.model('SkippedJob',    SkippedJobSchema);
+const OutreachContactSchema = new mongoose.Schema({
+  companyId:    String,
+  companyName:  { type: String, required: true },
+  email:        { type: String, required: true, unique: true },
+  source:       String,  // 'careers-page' | 'company-site' | 'search'
+  confidence:   { type: String, default: 'medium' }, // 'high' | 'medium' | 'low'
+  status:       { type: String, default: 'pending' }, // pending | sent | skipped | bounced
+  sentAt:       Date,
+  coverLetter:  String,
+  replyStatus:  String,  // interested | rejected | auto-reply | other
+  replySnippet: String,
+  repliedAt:    Date,
+  discoveredAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+const Company        = mongoose.models.Company        || mongoose.model('Company',        CompanySchema);
+const Job            = mongoose.models.Job            || mongoose.model('Job',            JobSchema);
+const LinkedInPerson = mongoose.models.LinkedInPerson  || mongoose.model('LinkedInPerson',  LinkedInPersonSchema);
+const AppliedJob     = mongoose.models.AppliedJob      || mongoose.model('AppliedJob',      AppliedJobSchema);
+const SkippedJob     = mongoose.models.SkippedJob      || mongoose.model('SkippedJob',      SkippedJobSchema);
+const OutreachContact= mongoose.models.OutreachContact || mongoose.model('OutreachContact', OutreachContactSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -138,6 +154,13 @@ function jsonReadSkipped() {
 }
 function jsonWriteSkipped(data) {
   fs.writeFileSync(path.join(DATA_DIR, 'skipped-jobs.json'), JSON.stringify(data, null, 2));
+}
+function jsonReadOutreach() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'outreach-contacts.json'), 'utf-8')); }
+  catch { return []; }
+}
+function jsonWriteOutreach(data) {
+  fs.writeFileSync(path.join(DATA_DIR, 'outreach-contacts.json'), JSON.stringify(data, null, 2));
 }
 
 // ── Seed + backfill ───────────────────────────────────────────────────────────
@@ -351,4 +374,57 @@ export async function readSkippedLinks() {
   await connectDB();
   const docs = await SkippedJob.find({}, 'link').lean();
   return new Set(docs.map(d => d.link));
+}
+
+// ── Outreach Contacts ─────────────────────────────────────────────────────────
+export async function readOutreachContacts() {
+  if (!useMongo) return jsonReadOutreach();
+  await connectDB();
+  return OutreachContact.find().lean().sort({ discoveredAt: -1 });
+}
+
+export async function readOutreachEmails() {
+  if (!useMongo) return new Set(jsonReadOutreach().map(c => c.email.toLowerCase()));
+  await connectDB();
+  const docs = await OutreachContact.find({}, 'email').lean();
+  return new Set(docs.map(d => d.email.toLowerCase()));
+}
+
+export async function addOutreachContact(contact) {
+  if (!useMongo) {
+    const all = jsonReadOutreach();
+    if (all.some(c => c.email.toLowerCase() === contact.email.toLowerCase())) return null;
+    const entry = { ...contact, status: 'pending', discoveredAt: new Date().toISOString() };
+    all.push(entry);
+    jsonWriteOutreach(all);
+    return entry;
+  }
+  await connectDB();
+  try {
+    return await OutreachContact.create({ ...contact, status: 'pending' });
+  } catch {
+    return null; // duplicate email
+  }
+}
+
+export async function updateOutreachContact(email, update) {
+  if (!useMongo) {
+    const all = jsonReadOutreach();
+    const idx = all.findIndex(c => c.email.toLowerCase() === email.toLowerCase());
+    if (idx >= 0) Object.assign(all[idx], update);
+    jsonWriteOutreach(all);
+    return;
+  }
+  await connectDB();
+  return OutreachContact.findOneAndUpdate({ email: new RegExp(`^${email}$`, 'i') }, { $set: update });
+}
+
+export async function deleteOutreachContact(email) {
+  if (!useMongo) {
+    const all = jsonReadOutreach().filter(c => c.email.toLowerCase() !== email.toLowerCase());
+    jsonWriteOutreach(all);
+    return;
+  }
+  await connectDB();
+  return OutreachContact.deleteOne({ email: new RegExp(`^${email}$`, 'i') });
 }

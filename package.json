@@ -10,9 +10,12 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "imapflow": "^1.4.7",
     "lucide-react": "^0.400.0",
+    "mailparser": "^3.9.14",
     "mongoose": "^9.7.3",
     "next": "14.2.5",
+    "nodemailer": "^9.0.3",
     "openai": "^6.45.0",
     "puppeteer": "^22.12.0",
     "react": "^18.3.1",
