@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RefreshCw, Plus, Search, Zap, Briefcase, X, Terminal, ChevronDown, ChevronUp, Bot, Send, Users, CheckCircle2, MapPin, ExternalLink } from 'lucide-react';
+import { RefreshCw, Plus, Search, Zap, Briefcase, X, Terminal, ChevronDown, ChevronUp, Bot, Send, Users, CheckCircle2, MapPin, ExternalLink, LogOut } from 'lucide-react';
 import CompanyCard from '@/components/CompanyCard';
 import AddCompanyModal from '@/components/AddCompanyModal';
 import { getLinkedInPeopleTargets } from '@/lib/linkedin';
@@ -59,6 +59,11 @@ export default function Dashboard() {
   }
 
   useEffect(() => { load(); }, []);
+
+  async function handleLogout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login';
+  }
 
   async function streamScrape(url, body, label) {
     setShowLogs(true);
@@ -270,6 +275,13 @@ export default function Dashboard() {
                 text-xs text-emerald-100 font-medium transition-colors disabled:opacity-40">
               <RefreshCw size={12} className={scanning ? 'animate-spin' : ''} />
               {scanning ? 'Scanning...' : 'Refresh All'}
+            </button>
+
+            <button onClick={handleLogout}
+              title="Log out"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#21262d] hover:bg-red-900/40
+                text-xs text-[#8b949e] hover:text-red-300 border border-[#30363d] hover:border-red-700/50 transition-colors">
+              <LogOut size={12} />
             </button>
           </div>
         </div>
