@@ -1,9 +1,16 @@
 // Personalized cover letter generation: Gemini → OpenAI → static template fallback.
-import {
-  getProfileHighlightsText,
-  getProfileSkillsText,
-  PROFILE,
-} from './profile.js';
+import { PROFILE } from './profile.js';
+
+// Full accomplishment detail pulled straight from the resume — kept here
+// rather than in profile.js since profile.js's highlights feed job-matching
+// prompts elsewhere and are tuned for that, not for outreach email copy.
+const EXPERIENCE_CONTEXT = `
+- Currently Software Engineer at Magna International (Factory Solutions, since July 2025): builds GoLang microservices for AMR bot automation (dispatch service, error handling/monitoring), and independently designed + delivered an enterprise-grade RBAC-via-OIDC authentication system from scratch — gathered requirements across robotics/operations/security teams, architected the full auth/authorization flow, and built the Vue.js frontend with OIDC-token-based protected routes. Also works on SmartPick, a forklift/tugger bot automation platform. Stack: GoLang, Vue.js, Docker, Kubernetes.
+- Before that, Full-Stack Developer at Cadera Infotech: built the Study Abroad section of CaderaEdu (React.js, Node.js/Express.js, MongoDB), including an admin/CRM dashboard and AI-powered workflows that automated ingestion and enrichment of college data.
+- Before that, Software Developer Intern at Foundry Digital, a US-based startup: built a weather system for their Optifleet product using Amazon Location Services + OpenWeatherMap API, Dockerized it and deployed as an AWS ECS service, later re-engineered into their core .NET/TypeScript codebase with Prometheus monitoring.
+- Personal project, CareerMentorEdu (careermentoredu.com): a full-stack EdTech platform built solo, with a fully autonomous admin dashboard — scrapes college data via Puppeteer, enriches content with Claude AI, generates images with DALL-E 3, produces marketing videos via HeyGen, and runs Meta Ads campaigns end-to-end with zero manual intervention.
+- Core skills: React.js, Next.js, Vue.js, Node.js/Express.js, GoLang, MongoDB, PostgreSQL, Redis, Docker, Kubernetes, AWS, OIDC/RBAC/OAuth2/JWT, OpenAI/Claude/LLM integration.
+`.trim();
 
 function buildSignature() {
   return `Best regards,\n${PROFILE.name}\n${PROFILE.phone}`;
@@ -14,21 +21,21 @@ function wrapBody(body) {
 }
 
 function buildPrompt(companyName) {
-  return `Write the BODY PARAGRAPHS ONLY (no greeting, no sign-off, no signature — those are added separately) of a short, direct cold-outreach email from ${PROFILE.name}, a Full-Stack AI Engineer, to the HR/talent team at "${companyName}".
+  return `Write the BODY PARAGRAPHS ONLY (no greeting, no sign-off, no signature — those are added separately) of a cold-outreach email from ${PROFILE.name}, a Full-Stack/AI Engineer, to the HR/recruiting team at "${companyName}".
 
-Context on the candidate:
-- ${getProfileHighlightsText()}
-- Core skills: ${getProfileSkillsText()}.
-- ${PROFILE.experienceYears} years of experience, based in ${PROFILE.currentLocation}, open to roles across ${PROFILE.targetLocation}.
+Candidate background (use this, don't invent anything beyond it):
+${EXPERIENCE_CONTEXT}
 
 Requirements:
-- 90-140 words, plain text (no markdown, no subject line, no greeting like "Hi", no sign-off, no placeholders like [Company]).
-- Open with a direct, concrete statement of who the candidate is and what they're looking for at "${companyName}" — do NOT open with invented flattery about the company's "mission", "innovation", "culture", or similar guesses, since you have no real information about them beyond their name. Skip straight to substance.
-- Mention 2-3 concrete, relevant skills/experience points, not a generic list.
+- 160-220 words, plain text (no markdown, no subject line, no greeting, no sign-off, no placeholders like [Company]).
+- Open with a direct, concrete statement of who the candidate is and what they're looking for at "${companyName}" — do NOT invent flattery about the company's "mission", "innovation", "culture", or similar guesses, since there's no real information about them beyond their name. Skip straight to substance.
+- Do NOT state a specific number of years of experience (e.g. "1.9 years") — let the roles and companies speak for themselves instead.
+- Cover ALL FOUR of: the current role at Magna International (RBAC-via-OIDC + bot automation), Cadera Infotech (React.js/Node.js/MongoDB + AI workflows), Foundry Digital — call it out explicitly as a US-based startup — and the CareerMentorEdu project. One or two concrete details per company/project is enough; don't just list job titles with no substance.
+- Weave in a couple of the core skills naturally (e.g. GoLang, React.js/Vue.js, Docker/Kubernetes, OpenAI/Claude/LLM integration) rather than a bare list.
 - Mention the attached resume.
-- End the paragraphs with a single direct line asking if they're open to a quick conversation — no "thank you for your time" filler.
-- Do not invent facts not present in the context above.
-- Avoid generic corporate phrases like "aligns with your mission", "passion for leveraging", "operational efficiency", "excited about the opportunity" — write plainly, like a real engineer emailing a person, not like a form letter.
+- End with ONE low-pressure line inviting them to connect if there's a relevant opening — do NOT phrase it as a presumptuous question like "Are you open to a quick conversation?". Something like "Happy to share more if there's a role where this could be a fit." works.
+- Do not invent facts beyond what's given above.
+- Avoid generic corporate phrases like "aligns with your mission", "passion for leveraging", "operational efficiency", "excited about the opportunity", "significantly improved". Write plainly, like an engineer emailing a person, not a form letter.
 
 Return ONLY the body paragraphs, nothing else.`;
 }
@@ -57,11 +64,11 @@ async function generateWithOpenAI(companyName) {
 }
 
 function fallbackBody(companyName) {
-  return `I'm ${PROFILE.name}, a Full-Stack AI Engineer with ${PROFILE.experienceYears} years of experience building production systems with ${getProfileSkillsText()}. I'm reaching out about full-stack or AI engineering opportunities at ${companyName}.
+  return `I'm ${PROFILE.name}, a Full-Stack/AI Engineer, and I'm reaching out about full-stack or AI engineering opportunities at ${companyName}.
 
-${getProfileHighlightsText()}
+I'm currently at Magna International building GoLang microservices for bot automation and delivered an enterprise-grade RBAC-via-OIDC system from scratch. Before that, I was at Cadera Infotech (React.js/Node.js/MongoDB, AI-powered workflows) and Foundry Digital, a US-based startup (AWS ECS, .NET/TypeScript). I also built CareerMentorEdu (careermentoredu.com) solo — a full-stack EdTech platform with a fully autonomous AI content and ad-campaign pipeline.
 
-I've attached my resume. Open to a quick call if there's a fit?`;
+I've attached my resume. Happy to share more if there's a role where this could be a fit.`;
 }
 
 export async function generateCoverLetter(companyName) {
