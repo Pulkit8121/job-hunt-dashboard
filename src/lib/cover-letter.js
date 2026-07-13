@@ -5,8 +5,16 @@ import {
   PROFILE,
 } from './profile.js';
 
+function buildSignature() {
+  return `Best regards,\n${PROFILE.name}\n${PROFILE.phone}`;
+}
+
+function wrapBody(body) {
+  return `Hi,\n\n${body.trim()}\n\n${buildSignature()}`;
+}
+
 function buildPrompt(companyName) {
-  return `Write a short, warm, specific cold-outreach email cover letter from ${PROFILE.name}, a Full-Stack AI Engineer, to the HR/talent team at "${companyName}".
+  return `Write the BODY PARAGRAPHS ONLY (no greeting, no sign-off, no signature — those are added separately) of a short, direct cold-outreach email from ${PROFILE.name}, a Full-Stack AI Engineer, to the HR/talent team at "${companyName}".
 
 Context on the candidate:
 - ${getProfileHighlightsText()}
@@ -14,14 +22,15 @@ Context on the candidate:
 - ${PROFILE.experienceYears} years of experience, based in ${PROFILE.currentLocation}, open to roles across ${PROFILE.targetLocation}.
 
 Requirements:
-- 120-180 words, plain text (no markdown, no subject line, no placeholders like [Company]).
-- Open by naming the company specifically and why you're interested in a full-stack/AI engineering role there.
+- 90-140 words, plain text (no markdown, no subject line, no greeting like "Hi", no sign-off, no placeholders like [Company]).
+- Open with a direct, concrete statement of who the candidate is and what they're looking for at "${companyName}" — do NOT open with invented flattery about the company's "mission", "innovation", "culture", or similar guesses, since you have no real information about them beyond their name. Skip straight to substance.
 - Mention 2-3 concrete, relevant skills/experience points, not a generic list.
 - Mention the attached resume.
-- End with a polite call to action and sign off with just "${PROFILE.name}".
+- End the paragraphs with a single direct line asking if they're open to a quick conversation — no "thank you for your time" filler.
 - Do not invent facts not present in the context above.
+- Avoid generic corporate phrases like "aligns with your mission", "passion for leveraging", "operational efficiency", "excited about the opportunity" — write plainly, like a real engineer emailing a person, not like a form letter.
 
-Return ONLY the email body text.`;
+Return ONLY the body paragraphs, nothing else.`;
 }
 
 async function generateWithGemini(companyName) {
@@ -47,25 +56,20 @@ async function generateWithOpenAI(companyName) {
   return res.choices[0].message.content.trim();
 }
 
-function fallbackTemplate(companyName) {
-  return `Hi,
-
-I'm ${PROFILE.name}, a Full-Stack AI Engineer with ${PROFILE.experienceYears} years of experience building production systems with ${getProfileSkillsText()}. I'm reaching out because I'd love to explore full-stack or AI engineering opportunities at ${companyName}.
+function fallbackBody(companyName) {
+  return `I'm ${PROFILE.name}, a Full-Stack AI Engineer with ${PROFILE.experienceYears} years of experience building production systems with ${getProfileSkillsText()}. I'm reaching out about full-stack or AI engineering opportunities at ${companyName}.
 
 ${getProfileHighlightsText()}
 
-I've attached my resume for more detail. I'd welcome the chance to talk about how I could contribute to your team — happy to share more about my background whenever convenient.
-
-Thanks for your time,
-${PROFILE.name}`;
+I've attached my resume. Open to a quick call if there's a fit?`;
 }
 
 export async function generateCoverLetter(companyName) {
   try {
-    return await generateWithGemini(companyName);
+    return wrapBody(await generateWithGemini(companyName));
   } catch {}
   try {
-    return await generateWithOpenAI(companyName);
+    return wrapBody(await generateWithOpenAI(companyName));
   } catch {}
-  return fallbackTemplate(companyName);
+  return wrapBody(fallbackBody(companyName));
 }

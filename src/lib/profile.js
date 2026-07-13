@@ -1,5 +1,6 @@
 export const PROFILE = {
   name: 'Pulkit Agarwal',
+  phone: '+91 8299559013',
   title: 'Full-stack / backend engineer',
   currentLocation: 'Bengaluru, Karnataka',
   experienceYears: 1.9,
