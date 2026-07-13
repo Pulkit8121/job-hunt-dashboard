@@ -17,20 +17,25 @@ async function getTransporter() {
   return transporter;
 }
 
-// Gmail renders plain-text-only emails in a small default font. This wraps the
-// same text in one consistent, readable font/size — no bold, no size changes
-// anywhere in it, just legible instead of tiny. `text` is still sent alongside
-// as the fallback for clients that prefer plain text.
-function toReadableHtml(text) {
+// Gmail renders plain-text-only emails in a small default font. We send an HTML
+// version wrapped in one consistent, readable font/size so it's legible instead
+// of tiny. If a pre-built html fragment (with intentional bold) is passed we use
+// it; otherwise we derive a plain, unstyled HTML from the text. Either way the
+// raw `text` is still sent alongside as the fallback for plain-text clients.
+function wrapHtml(htmlFragment) {
+  return `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.6; color: #202124;">${htmlFragment}</div>`;
+}
+
+function textToHtml(text) {
   const escaped = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>');
-  return `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.6; color: #202124;">${escaped}</div>`;
+  return wrapHtml(escaped);
 }
 
-export async function sendOutreachEmail({ to, subject, text }) {
+export async function sendOutreachEmail({ to, subject, text, html }) {
   const resumePath = path.resolve(process.cwd(), process.env.RESUME_PATH || './data/resume.pdf');
   const t = await getTransporter();
   return t.sendMail({
@@ -38,7 +43,7 @@ export async function sendOutreachEmail({ to, subject, text }) {
     to,
     subject,
     text,
-    html: toReadableHtml(text),
+    html: html ? wrapHtml(html) : textToHtml(text),
     attachments: [{ filename: 'Pulkit_Agarwal_Resume.pdf', path: resumePath }],
   });
 }

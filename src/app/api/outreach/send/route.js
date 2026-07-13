@@ -72,16 +72,17 @@ export async function POST(request) {
 
         try {
           await send(`✉ Preparing cover letter for ${contact.companyName}...`);
-          const coverLetter = await generateCoverLetter(contact.companyName);
+          const { text, html } = await generateCoverLetter(contact.companyName);
           await sendOutreachEmail({
             to: contact.email,
             subject: `Full-Stack AI Engineer — application for ${contact.companyName}`,
-            text: coverLetter,
+            text,
+            html,
           });
           await updateOutreachContact(contact.email, {
             status: 'sent',
             sentAt: new Date(),
-            coverLetter,
+            coverLetter: text,
           });
           sent++;
           await send(`✓ Sent to ${contact.companyName} (${contact.email})`);
