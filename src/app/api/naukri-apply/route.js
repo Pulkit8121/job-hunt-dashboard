@@ -71,7 +71,11 @@ export async function POST(request) {
       // own headless Chrome and logs in with credentials. Locally, leave it unset
       // to attach to your visible Chrome on :9222 (or launch a visible window).
       const headless = process.env.APPLY_HEADLESS === 'true';
-      ({ browser, connected } = await getBrowser({ headless, requireConnected: false }));
+      ({ browser, connected } = await getBrowser({
+        headless,
+        requireConnected: false,
+        preferConnected: !headless,
+      }));
       const { page: workPage, reusedExisting, reason } = await getReusablePage(browser, {
         hosts: ['naukri.com'],
       });

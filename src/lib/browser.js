@@ -3,27 +3,29 @@
 //   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check
 // Or add --remote-debugging-port=9222 to your Chrome shortcut.
 
-export async function getBrowser({ headless = false, requireConnected = false } = {}) {
+export async function getBrowser({ headless = false, requireConnected = false, preferConnected = true } = {}) {
   const puppeteer = (await import('puppeteer')).default;
   const browserURL = process.env.CHROME_REMOTE_DEBUG_URL || 'http://localhost:9222';
 
   // Try connecting to existing Chrome on port 9222 first
-  try {
-    const res = await fetch(`${browserURL}/json/version`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (res.ok) {
-      const { webSocketDebuggerUrl } = await res.json();
-      if (webSocketDebuggerUrl) {
-        const browser = await puppeteer.connect({
-          browserWSEndpoint: webSocketDebuggerUrl,
-          defaultViewport: null, // use Chrome's own viewport
-        });
-        return { browser, connected: true };
+  if (preferConnected) {
+    try {
+      const res = await fetch(`${browserURL}/json/version`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) {
+        const { webSocketDebuggerUrl } = await res.json();
+        if (webSocketDebuggerUrl) {
+          const browser = await puppeteer.connect({
+            browserWSEndpoint: webSocketDebuggerUrl,
+            defaultViewport: null, // use Chrome's own viewport
+          });
+          return { browser, connected: true };
+        }
       }
+    } catch {
+      // Chrome not running with remote debugging — fall through to launch
     }
-  } catch {
-    // Chrome not running with remote debugging — fall through to launch
   }
 
   if (requireConnected) {
