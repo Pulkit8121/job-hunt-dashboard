@@ -7,7 +7,10 @@ export async function getBrowser({ headless = false, requireConnected = false, p
   const puppeteer = (await import('puppeteer')).default;
   const browserURL = process.env.CHROME_REMOTE_DEBUG_URL || 'http://localhost:9222';
 
-  // Try connecting to existing Chrome on port 9222 first
+  // Try connecting to existing Chrome on port 9222 first. A CDP WebSocket
+  // connect can hang forever if that Chrome is alive-but-wedged (e.g. stuck on
+  // a captcha/dialog for days) — race it against a timeout so a broken shared
+  // browser can never block every other automation that tries to reuse it.
   if (preferConnected) {
     try {
       const res = await fetch(`${browserURL}/json/version`, {
@@ -16,15 +19,20 @@ export async function getBrowser({ headless = false, requireConnected = false, p
       if (res.ok) {
         const { webSocketDebuggerUrl } = await res.json();
         if (webSocketDebuggerUrl) {
-          const browser = await puppeteer.connect({
-            browserWSEndpoint: webSocketDebuggerUrl,
-            defaultViewport: null, // use Chrome's own viewport
-          });
+          const browser = await Promise.race([
+            puppeteer.connect({
+              browserWSEndpoint: webSocketDebuggerUrl,
+              defaultViewport: null, // use Chrome's own viewport
+            }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('puppeteer.connect timed out — existing Chrome is unresponsive')), 5000)
+            ),
+          ]);
           return { browser, connected: true };
         }
       }
     } catch {
-      // Chrome not running with remote debugging — fall through to launch
+      // Chrome not running (or unresponsive) with remote debugging — fall through to launch
     }
   }
 

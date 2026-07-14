@@ -115,7 +115,15 @@ export async function POST(request) {
 
         for (const url of phase.urls) {
           await send(`🔍 Scanning: ${url}`);
-          const cards = await scrapeWellfoundJobCards(workPage, url);
+          let cards;
+          try {
+            cards = await scrapeWellfoundJobCards(workPage, url);
+          } catch (e) {
+            // Transient Puppeteer/navigation errors on one search URL shouldn't
+            // kill the whole multi-phase run — skip it and keep going.
+            await send(`  ⚠ Skipped this URL (${e.message}) — continuing`);
+            continue;
+          }
           await send(`  Found ${cards.length} job cards`);
           for (const card of cards) {
             const key = (card.applyUrl || card.cardUrl || '').split('?')[0];
