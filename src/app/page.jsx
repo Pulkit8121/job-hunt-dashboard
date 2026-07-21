@@ -4,6 +4,7 @@ import { RefreshCw, Plus, Search, Zap, Briefcase, X, Terminal, ChevronDown, Chev
 import CompanyCard from '@/components/CompanyCard';
 import AddCompanyModal from '@/components/AddCompanyModal';
 import OutreachPanel from '@/components/OutreachPanel';
+import RecentJobsPanel from '@/components/RecentJobsPanel';
 import { getLinkedInPeopleTargets } from '@/lib/linkedin';
 import { getProfileHeaderLine } from '@/lib/profile';
 
@@ -11,7 +12,7 @@ const WORK_TABS    = [{ id:'all',label:'All'},{ id:'remote',label:'🌐 Remote'}
 const TYPE_FILTERS = [{ id:'all',label:'All'},{ id:'easy-mnc',label:'Easy MNC'},{ id:'remote-mnc',label:'Remote MNC'},{ id:'hard',label:'Hard'},{ id:'startup',label:'Startup'}];
 const SCAN_FILTERS = [{ id:'all',label:'All'},{ id:'scanned',label:'Scanned'},{ id:'unscanned',label:'Unscanned'}];
 const JOB_VIEW_TABS= [{ id:'recommended',label:'Profile Fit'},{ id:'low-match',label:'Low Match'}];
-const MAIN_TABS    = [{ id:'dashboard',label:'Dashboard'},{ id:'applied',label:'Applied Jobs'},{ id:'outreach',label:'Outreach'}];
+const MAIN_TABS    = [{ id:'dashboard',label:'Dashboard'},{ id:'applied',label:'Applied Jobs'},{ id:'recent',label:'Recent Jobs'},{ id:'outreach',label:'Outreach'}];
 
 export default function Dashboard() {
   const [companies, setCompanies]     = useState([]);
@@ -442,6 +443,13 @@ export default function Dashboard() {
               ))}
             </div>
           )}
+        </main>
+      )}
+
+      {/* ── Recent Jobs Tab ── */}
+      {mainTab === 'recent' && (
+        <main className="max-w-7xl mx-auto px-4 py-6 pb-24">
+          <RecentJobsPanel jobs={jobs} companies={companies} />
         </main>
       )}
 

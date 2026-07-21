@@ -39,3 +39,4 @@ data/resume.pdf
 .vercel
 .turbo
 .claude/
+.aider*

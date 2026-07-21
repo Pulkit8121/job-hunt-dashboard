@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 import { readCompanies, readOutreachContacts, addOutreachContact } from '@/lib/db';
 import { isExcludedCompany, getExcludedCompanies, isExcludedOutreachCompany, isExcludedOutreachDomain } from '@/lib/exclusions';
 import { findContactForCompany } from '@/lib/outreach-discovery';
+import { startRun, finishRun, isRunning } from '@/lib/discoverRunState';
 
 const CONCURRENCY = 5;
 
@@ -27,6 +28,15 @@ export async function POST(request) {
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
   const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`));
+
+  if (isRunning()) {
+    await send('⚠ A contact-discovery run is already in progress. Skipping this trigger.');
+    await writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+    });
+  }
+  startRun();
 
   (async () => {
     try {
@@ -81,6 +91,7 @@ export async function POST(request) {
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
+      finishRun();
       await writer.close().catch(() => {});
     }
   })();
