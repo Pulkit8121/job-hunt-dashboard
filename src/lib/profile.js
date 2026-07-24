@@ -1,6 +1,9 @@
 export const PROFILE = {
   name: 'Pulkit Agarwal',
   phone: '+91 8299559013',
+  email: process.env.WELLFOUND_EMAIL || process.env.SMTP_EMAIL || '',
+  linkedinUrl: process.env.WELLFOUND_LINKEDIN || '',
+  githubUrl: process.env.WELLFOUND_GITHUB || '',
   title: 'Full-stack / backend engineer',
   currentLocation: 'Bengaluru, Karnataka',
   experienceYears: 1.9,
@@ -9,6 +12,23 @@ export const PROFILE = {
   targetLocation: 'India',
   workAuthorization: 'India',
   minSalaryLpa: 12,
+  // Used by the company-portal apply agent (Greenhouse/Lever/Ashby), which
+  // applies globally rather than filtering to India-only like the Naukri flow.
+  globalLocationPreference: {
+    indiaCity: 'Bengaluru',
+    openToAnyCity: true,
+    openToRemoteWorldwide: true,
+    openToUsRemote: true,
+  },
+  // Self-disclosed EEO/screening answers, used to auto-answer the demographic
+  // and work-authorization questions common on Greenhouse/Lever/Ashby forms.
+  eeo: {
+    gender: 'Male',
+    ethnicity: 'Asian',
+    veteranStatus: 'I am not a protected veteran',
+    disabilityStatus: 'I do not wish to answer',
+    requiresSponsorship: true,
+  },
   preferredCities: [
     { slug: 'bengaluru', label: 'Bengaluru' },
     { slug: 'hyderabad', label: 'Hyderabad' },

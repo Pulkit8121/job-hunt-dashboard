@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles } from 'lucide-react';
+import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper } from 'lucide-react';
 
 const STATUS_BADGE = {
   pending: 'bg-gray-700/40 text-gray-300 border-gray-600/40',
@@ -26,6 +26,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [discovering, setDiscovering] = useState(false);
+  const [discoveringHn, setDiscoveringHn] = useState(false);
   const [sending, setSending] = useState(false);
   const [checkingReplies, setCheckingReplies] = useState(false);
   const [testSending, setTestSending] = useState(false);
@@ -51,6 +52,16 @@ export default function OutreachPanel({ streamScrape, busy }) {
       await streamScrape('/api/outreach/discover', { cap }, `Discovering up to ${cap} HR/careers contacts...`);
     } finally {
       setDiscovering(false);
+      await load();
+    }
+  }
+
+  async function handleDiscoverHn() {
+    setDiscoveringHn(true);
+    try {
+      await streamScrape('/api/outreach/discover-hn', {}, 'Scanning latest HN "Who is hiring?" thread...');
+    } finally {
+      setDiscoveringHn(false);
       await load();
     }
   }
@@ -147,6 +158,22 @@ export default function OutreachPanel({ streamScrape, busy }) {
               {discovering ? 'Discovering...' : 'Discover Contacts'}
             </button>
           </div>
+        </div>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-3 border-t border-sky-700/20">
+          <div>
+            <h2 className="text-sm font-bold text-sky-200 flex items-center gap-2">
+              <Newspaper size={14} /> Scan HN &quot;Who is Hiring?&quot;
+            </h2>
+            <p className="text-xs text-sky-100/60 mt-1">
+              Pulls the latest monthly Hacker News hiring thread and saves any contact email each company posted directly in their listing.
+            </p>
+          </div>
+          <button onClick={handleDiscoverHn} disabled={busy || discoveringHn}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-sky-700 hover:bg-sky-600
+              text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg shrink-0">
+            <Newspaper size={14} className={discoveringHn ? 'animate-pulse' : ''} />
+            {discoveringHn ? 'Scanning thread...' : 'Scan HN Thread'}
+          </button>
         </div>
       </div>
 

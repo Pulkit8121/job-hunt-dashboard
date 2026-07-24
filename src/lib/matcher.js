@@ -143,6 +143,55 @@ export function isIndiaEligibleLocation(location = '', description = '') {
   return descriptionHasIndia && !descriptionHasOutsideIndia;
 }
 
+// Patterns that make a listing a guaranteed reject regardless of location —
+// used by the company-portal apply agent, which otherwise applies worldwide
+// (any city, remote, US tech remote — see PROFILE.globalLocationPreference)
+// since the applicant is open to relocating/remote and will honestly answer
+// "requires sponsorship" on the application itself rather than being
+// pre-filtered out by geography.
+const GUARANTEED_REJECT_PATTERNS = [
+  /\bmust be(?:come)? a?.{0,25}\bcitizen/i,
+  /\bcitizenship\s+required/i,
+  /\bus\s+citizen(?:ship)?\s+(?:is\s+)?required/i,
+  /\bsecurity clearance/i,
+  /\bno\s+(?:visa\s+)?sponsorship/i,
+  /\bunable to sponsor/i,
+  /\bwill not sponsor/i,
+  /\bdoes not (?:offer|provide) (?:visa )?sponsorship/i,
+];
+
+export function isGlobalEligibleLocation(location = '', description = '') {
+  const text = `${location} ${description}`.toLowerCase();
+  return !GUARANTEED_REJECT_PATTERNS.some(pattern => pattern.test(text));
+}
+
+// Same title/experience filters as filterEligibleJobs, but without the
+// India-only location gate — for the company-portal apply flow, which is
+// intentionally global rather than India-scoped like the Naukri flow.
+export function filterGlobalEligibleJobs(jobs = [], limit = 15) {
+  const eligible = [];
+  const excluded = { title: 0, location: 0, experience: 0 };
+
+  for (const job of jobs) {
+    if (!isRelevantJob(job.title || '') || !isEligibleTitle(job.title || '')) {
+      excluded.title++;
+      continue;
+    }
+    if (!isGlobalEligibleLocation(job.location, job.description)) {
+      excluded.location++;
+      continue;
+    }
+    if (!isEligibleExperience(job)) {
+      excluded.experience++;
+      continue;
+    }
+    eligible.push(job);
+    if (eligible.length >= limit) break;
+  }
+
+  return { eligible, excluded };
+}
+
 export function filterEligibleJobs(jobs = [], limit = 15) {
   const eligible = [];
   const excluded = {

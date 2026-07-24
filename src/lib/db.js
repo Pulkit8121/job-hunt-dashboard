@@ -69,6 +69,7 @@ const JobSchema = new mongoose.Schema({
   matchedSkills: [String],
   aiSummary:     String,
   isEasyApply:   { type: Boolean, default: false },
+  atsType:       String, // 'greenhouse' | 'lever' | 'ashby' | 'workday' — set by company-portal-discovery
 }, { timestamps: true });
 
 const LinkedInPersonSchema = new mongoose.Schema({
@@ -113,12 +114,23 @@ const OutreachContactSchema = new mongoose.Schema({
   discoveredAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
+const MailInsightSchema = new mongoose.Schema({
+  messageId: { type: String, required: true, unique: true },
+  from:      String,
+  subject:   String,
+  snippet:   String,
+  category:  String, // 'positive' | 'assessment' | 'rejected' | 'other'
+  receivedAt:Date,
+  scannedAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+
 const Company        = mongoose.models.Company        || mongoose.model('Company',        CompanySchema);
 const Job            = mongoose.models.Job            || mongoose.model('Job',            JobSchema);
 const LinkedInPerson = mongoose.models.LinkedInPerson  || mongoose.model('LinkedInPerson',  LinkedInPersonSchema);
 const AppliedJob     = mongoose.models.AppliedJob      || mongoose.model('AppliedJob',      AppliedJobSchema);
 const SkippedJob     = mongoose.models.SkippedJob      || mongoose.model('SkippedJob',      SkippedJobSchema);
 const OutreachContact= mongoose.models.OutreachContact || mongoose.model('OutreachContact', OutreachContactSchema);
+const MailInsight    = mongoose.models.MailInsight     || mongoose.model('MailInsight',     MailInsightSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -161,6 +173,13 @@ function jsonReadOutreach() {
 }
 function jsonWriteOutreach(data) {
   fs.writeFileSync(path.join(DATA_DIR, 'outreach-contacts.json'), JSON.stringify(data, null, 2));
+}
+function jsonReadMailInsights() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'mail-insights.json'), 'utf-8')); }
+  catch { return []; }
+}
+function jsonWriteMailInsights(data) {
+  fs.writeFileSync(path.join(DATA_DIR, 'mail-insights.json'), JSON.stringify(data, null, 2));
 }
 
 // ── Seed + backfill ───────────────────────────────────────────────────────────
@@ -427,4 +446,35 @@ export async function deleteOutreachContact(email) {
   }
   await connectDB();
   return OutreachContact.deleteOne({ email: new RegExp(`^${email}$`, 'i') });
+}
+
+// ── Mail Insights ─────────────────────────────────────────────────────────────
+export async function readMailInsights() {
+  if (!useMongo) return jsonReadMailInsights();
+  await connectDB();
+  return MailInsight.find().lean().sort({ receivedAt: -1 });
+}
+
+export async function readMailInsightIds() {
+  if (!useMongo) return new Set(jsonReadMailInsights().map(m => m.messageId));
+  await connectDB();
+  const docs = await MailInsight.find({}, 'messageId').lean();
+  return new Set(docs.map(d => d.messageId));
+}
+
+export async function addMailInsight(insight) {
+  if (!useMongo) {
+    const all = jsonReadMailInsights();
+    if (all.some(m => m.messageId === insight.messageId)) return null;
+    const entry = { ...insight, scannedAt: new Date().toISOString() };
+    all.push(entry);
+    jsonWriteMailInsights(all);
+    return entry;
+  }
+  await connectDB();
+  try {
+    return await MailInsight.create(insight);
+  } catch {
+    return null; // duplicate messageId
+  }
 }

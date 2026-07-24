@@ -23,7 +23,7 @@ export function sortJobsBySource(jobs) {
 }
 
 // ── Greenhouse public JSON API (no browser needed) ──────────────────────────
-async function scrapeGreenhouse(slug) {
+export async function scrapeGreenhouse(slug) {
   try {
     const res = await fetch(
       `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`,
@@ -49,7 +49,7 @@ async function scrapeGreenhouse(slug) {
 }
 
 // ── Lever public JSON API (no browser needed) ────────────────────────────────
-async function scrapeLever(slug) {
+export async function scrapeLever(slug) {
   try {
     const res = await fetch(
       `https://api.lever.co/v0/postings/${slug}?mode=json`,

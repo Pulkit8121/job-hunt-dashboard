@@ -2,7 +2,7 @@ import { PROFILE } from './profile.js';
 
 export const COMPANY_TYPES = ['easy-mnc', 'remote-mnc', 'hard', 'startup', 'unknown'];
 export const WORK_MODES = ['remote', 'hybrid', 'onsite', 'unknown'];
-export const ATS_TYPES = ['naukri', 'greenhouse', 'lever'];
+export const ATS_TYPES = ['naukri', 'greenhouse', 'lever', 'ashby', 'workday'];
 export const DIFFICULTIES = ['easy', 'moderate', 'hard'];
 
 export const DISCOVERY_ROLE_SEARCHES = PROFILE.discoveryRoles;

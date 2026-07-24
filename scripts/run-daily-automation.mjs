@@ -65,7 +65,13 @@ async function runOutreachBranch() {
 
   await runSseTask('/api/outreach/discover', { cap: discoverCap }, 'outreach-discover');
   await sleep(1000);
+  await runSseTask('/api/outreach/discover-hn', {}, 'outreach-discover-hn');
+  await sleep(1000);
   await runSseTask('/api/outreach/send', { limit: sendLimit }, 'outreach-send');
+}
+
+async function runCompanyPortalBranch() {
+  await runSseTask('/api/company-portal-apply', {}, 'company-portal-apply');
 }
 
 async function runLinkedInBranch() {
@@ -82,6 +88,10 @@ async function runLinkedInBranch() {
   await runSseTask('/api/linkedin-connect', { limit: connectLimit, headless: true }, 'linkedin-connect');
 }
 
+async function runMailInsightsBranch() {
+  await runSseTask('/api/mail-insights/scan', { sinceDays: 30 }, 'mail-insights-scan');
+}
+
 async function main() {
   console.log(`[daily] starting at ${new Date().toISOString()}`);
 
@@ -94,6 +104,8 @@ async function main() {
     runSseTask('/api/naukri-apply', {}, 'naukri-apply'),
     runOutreachBranch(),
     runLinkedInBranch(),
+    runCompanyPortalBranch(),
+    runMailInsightsBranch(),
   ]);
 
   console.log(`[daily] finished at ${new Date().toISOString()}`);
