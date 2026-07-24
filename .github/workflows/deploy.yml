@@ -28,6 +28,7 @@ jobs:
             "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
             'set -e
              export PATH="$PATH:/usr/bin:/usr/local/bin"
+             git config --global --add safe.directory /var/www/job-hunt-dashboard
              cd /var/www/job-hunt-dashboard
              git fetch origin main
              git reset --hard origin/main
