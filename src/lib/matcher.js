@@ -30,6 +30,20 @@ const INELIGIBLE_TITLE_HINTS = [
 
 const TARGET_ROLES = PROFILE.roleKeywords;
 
+// Word-boundary matching, not naive substring — short/generic keywords like
+// "swe" and "api" otherwise false-positive inside unrelated words ("Sweden",
+// "Grand Rapids"). This was previously masked for the India-only Naukri flow
+// (the separate India-location filter rejected those postings anyway) but
+// causes real mismatches now that the company-portal apply flow has no such
+// location filter — confirmed live: "Nurse Practitioner (Grand Rapids, MI)"
+// matched via "api" in "Rapids", "...Sweden/Denmark" matched via "swe".
+function keywordRegex(keyword) {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`, 'i');
+}
+const TARGET_ROLE_PATTERNS = TARGET_ROLES.map(keywordRegex);
+const EXCLUDE_ROLE_PATTERNS = EXCLUDE_ROLES.map(r => keywordRegex(r.trim()));
+
 const INDIA_LOCATION_PATTERNS = [
   /\bindia\b/,
   /\bbengaluru\b/,
@@ -90,8 +104,8 @@ const NON_INDIA_LOCATION_PATTERNS = [
 
 export function isRelevantJob(title = '') {
   const t = title.toLowerCase();
-  const hasTarget = TARGET_ROLES.some(r => t.includes(r));
-  const hasExclude = EXCLUDE_ROLES.some(r => t.includes(r));
+  const hasTarget = TARGET_ROLE_PATTERNS.some(re => re.test(t));
+  const hasExclude = EXCLUDE_ROLE_PATTERNS.some(re => re.test(t));
   return hasTarget && !hasExclude;
 }
 
