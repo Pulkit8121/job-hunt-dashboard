@@ -13,6 +13,15 @@ import { isExcludedOutreachDomain } from '@/lib/exclusions';
 const MIN_DELAY_MS = 10000;
 const MAX_DELAY_MS = 25000;
 
+// Hard ceiling on real outreach emails sent per day, regardless of
+// OUTREACH_DAILY_CAP env config — a personal Gmail account risks spam/abuse
+// flags well before Google's raw ~500/day technical limit, especially once
+// recipients include random personal addresses (HN "who's hiring" contacts)
+// rather than only verified company domains. Deliberately not configurable
+// via env var so a stale/high value on the server can't silently reintroduce
+// the risk this was added to prevent.
+const HARD_MAX_DAILY_SENDS = 40;
+
 function isToday(date) {
   if (!date) return false;
   const d = new Date(date);
@@ -41,7 +50,7 @@ export async function POST(request) {
 
   (async () => {
     try {
-      const dailyCap = Number(process.env.OUTREACH_DAILY_CAP) || 400;
+      const dailyCap = Math.min(Number(process.env.OUTREACH_DAILY_CAP) || 400, HARD_MAX_DAILY_SENDS);
       const all = await readOutreachContacts();
       const sentToday = all.filter(c => c.status === 'sent' && isToday(c.sentAt)).length;
       const remainingToday = Math.max(0, dailyCap - sentToday);
