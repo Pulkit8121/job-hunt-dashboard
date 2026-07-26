@@ -56,9 +56,13 @@ export async function POST() {
       }
       if (detectedCount) await send(`ℹ Auto-detected ATS platform for ${detectedCount} company(s).`);
 
-      const targets = companies.filter(c =>
-        AUTO_SUBMIT_ATS.includes(c.atsType) && c.atsSlug && !isExcludedCompany(c.name, excluded)
-      );
+      // Lever and Ashby first: Greenhouse job pages sit behind an invisible
+      // reCAPTCHA that we abort on, so processing them first just spends the
+      // run's time on companies that can't be submitted to anyway.
+      const atsPriority = { lever: 0, ashby: 1, greenhouse: 2 };
+      const targets = companies
+        .filter(c => AUTO_SUBMIT_ATS.includes(c.atsType) && c.atsSlug && !isExcludedCompany(c.name, excluded))
+        .sort((a, b) => (atsPriority[a.atsType] ?? 9) - (atsPriority[b.atsType] ?? 9));
       const workdayCount = companies.filter(c => c.atsType === 'workday').length;
 
       await send(`ℹ ${targets.length} companies on Greenhouse/Lever/Ashby to scan (of ${companies.length} tracked)${workdayCount ? `; ${workdayCount} Workday companies will be logged but not auto-submitted` : ''}.`);

@@ -700,6 +700,61 @@ async function answerChatbotTurn(page, ctx) {
   return `${res}[${source}]:${answer.slice(0, 40)}`;
 }
 
+// Resolves where Naukri's "Apply on company website" button actually goes.
+//
+// The old code only read an href off #company-site-button. That button is a JS
+// handler, not an anchor, so the read always came back empty and the job was
+// blacklisted as 'company-website' with no URL captured — 860 jobs were
+// discarded that way, versus 2 that ever got a usable link. Those are exactly
+// the jobs the company-portal flow could apply to, so recovering the URL turns
+// a dead end into a candidate.
+//
+// Clicking is safe: it only navigates to the employer's posting. window.open is
+// already neutralised into same-tab navigation, but some buttons still spawn a
+// tab, so check both.
+export async function captureExternalApplyUrl(page) {
+  const browser = page.browser();
+  const before = page.url();
+  const tabsBefore = new Set(await browser.pages());
+
+  const clicked = await page.evaluate(() => {
+    const btn = document.querySelector('#company-site-button');
+    if (btn) { btn.click(); return true; }
+    const PHRASES = ['apply on company', 'company website', 'visit employer', 'apply externally'];
+    for (const el of document.querySelectorAll('button, a, [class*="apply"]')) {
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (PHRASES.some(p => t.includes(p))) { el.click(); return true; }
+    }
+    return false;
+  }).catch(() => false);
+  if (!clicked) return null;
+
+  await page.waitForFunction(
+    (b) => window.location.href !== b,
+    { timeout: 9000 },
+    before
+  ).catch(() => {});
+
+  const isUsable = (u) => u && /^https?:/.test(u) && !u.includes('naukri.com') && !u.startsWith('about:');
+
+  let found = isUsable(page.url()) ? page.url() : null;
+
+  // Check for a spawned tab, and clean up anything we opened.
+  const tabsAfter = await browser.pages();
+  for (const p of tabsAfter) {
+    if (tabsBefore.has(p) || p === page) continue;
+    const u = p.url();
+    if (!found && isUsable(u)) found = u;
+    await p.close().catch(() => {});
+  }
+
+  // Leave the working tab where it started so the caller's loop is unaffected.
+  if (page.url() !== before) {
+    await page.goto(before, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+  }
+  return found;
+}
+
 // Attempt Naukri Easy Apply for a single job. Returns { success, reason, externalUrl? }
 export async function naukriEasyApply(page, job, signal, ctx) {
   try {
@@ -732,10 +787,16 @@ export async function naukriEasyApply(page, job, signal, ctx) {
       return null;
     });
     if (externalUrl) {
+      // '__external__' means we detected the button but couldn't read a link off
+      // it — which is the normal case, since it's a JS handler. Click through to
+      // find out where it goes instead of throwing the job away.
+      const resolved = externalUrl === '__external__'
+        ? await captureExternalApplyUrl(page).catch(() => null)
+        : externalUrl;
       return {
         success: false,
         reason: 'Apply on company website — skip',
-        externalUrl: externalUrl === '__external__' ? null : externalUrl,
+        externalUrl: resolved || null,
       };
     }
 

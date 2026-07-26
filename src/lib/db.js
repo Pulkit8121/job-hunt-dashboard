@@ -443,6 +443,38 @@ export async function recordSkipped(entries) {
   }
 }
 
+// Jobs the automation couldn't finish but that are still real matches —
+// CAPTCHA-gated, or a screening question the agent wouldn't guess at. These
+// are recorded as skipped so runs don't loop on them, which also made them
+// invisible; this surfaces them as a queue the user can finish by hand.
+export async function readManualQueue(reasons = ['captcha-detected', 'captcha-detected-post-submit', 'needs-human-answer', 'no-submit-button-found', 'form-validation-error']) {
+  if (!useMongo) {
+    return jsonReadSkipped()
+      .filter(s => reasons.includes(s.reason))
+      .sort((a, b) => new Date(b.skippedAt) - new Date(a.skippedAt));
+  }
+  await connectDB();
+  const docs = await SkippedJob.find({ reason: { $in: reasons } }).lean().sort({ skippedAt: -1 });
+
+  // Attach whatever we know about each job so the queue is readable.
+  const links = docs.map(d => d.link);
+  const jobs = await Job.find({ link: { $in: links } }, 'link title companyId').lean();
+  const byLink = new Map(jobs.map(j => [j.link, j]));
+  const companies = await Company.find({}, 'id name').lean();
+  const nameById = new Map(companies.map(c => [c.id, c.name]));
+
+  return docs.map(d => {
+    const j = byLink.get(d.link);
+    return {
+      link: d.link,
+      reason: d.reason,
+      skippedAt: d.skippedAt,
+      title: j?.title || null,
+      companyName: j ? (nameById.get(j.companyId) || j.companyId) : null,
+    };
+  });
+}
+
 export async function readSkippedLinks() {
   if (!useMongo) return new Set(jsonReadSkipped().map(s => s.link));
   await connectDB();
