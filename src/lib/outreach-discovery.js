@@ -6,6 +6,7 @@
 // contact per company — not a scrape of every address on the page.
 
 import { isExcludedOutreachDomain } from './exclusions.js';
+import { findEmailViaHunter } from './email-enrichment.js';
 
 const UA = 'Mozilla/5.0 (compatible; JobHuntBot/1.0; personal job-search tool)';
 const SEARCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -232,6 +233,13 @@ export async function findContactForCompany(company) {
     const confidence = isHrEmail(rankedPlain[0]) ? 'medium' : 'low';
     return { email: rankedPlain[0], source, confidence };
   }
+
+  // Last resort: Hunter.io knows addresses that were never printed on a
+  // crawlable page, which page-regex discovery structurally cannot find.
+  // Only reached when crawling found nothing, so it doesn't burn the free-tier
+  // quota on companies we could already solve for free. No-ops without a key.
+  const hunter = await findEmailViaHunter(baseUrl);
+  if (hunter) return hunter;
 
   return null;
 }

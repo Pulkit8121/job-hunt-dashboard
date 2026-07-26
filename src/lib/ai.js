@@ -1,36 +1,12 @@
-// AI job analysis: Gemini → OpenAI → keyword fallback
+// AI job analysis: LLM (see llm.js for provider order) → keyword fallback
 import { scoreJob, getTier } from './matcher.js';
+import { completeText } from './llm.js';
 import {
   getProfileHighlightsText,
   getProfileRoleText,
   getProfileSkillsText,
   getProfileSummary,
 } from './profile.js';
-
-async function analyzeWithGemini(jobText) {
-  if (!process.env.GEMINI_API_KEY) throw new Error('no key');
-  const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
-
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: buildPrompt(jobText) }] }],
-  });
-  return parseResponse(result.response.text());
-}
-
-async function analyzeWithOpenAI(jobText) {
-  if (!process.env.OPENAI_API_KEY) throw new Error('no key');
-  const OpenAI = (await import('openai')).default;
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  const res = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: buildPrompt(jobText) }],
-    temperature: 0,
-  });
-  return parseResponse(res.choices[0].message.content);
-}
 
 function buildPrompt(jobText) {
   return `You are evaluating a job posting for Pulkit Agarwal.
@@ -70,19 +46,16 @@ function parseResponse(text) {
   };
 }
 
-// Exported — tries Gemini first, then OpenAI, then falls back to keyword matcher
+// Exported — tries the configured LLM providers, then falls back to the keyword matcher
 export async function analyzeJob(job) {
   const jobText = `${job.title}\n${job.description || ''}`;
 
   // Only call AI if there's enough description text to analyse
   if (jobText.length > 80) {
-    try {
-      return await analyzeWithGemini(jobText);
-    } catch {}
-
-    try {
-      return await analyzeWithOpenAI(jobText);
-    } catch {}
+    const text = await completeText(buildPrompt(jobText));
+    if (text) {
+      try { return parseResponse(text); } catch {}
+    }
   }
 
   // Keyword fallback — always works, no API needed

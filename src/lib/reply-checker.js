@@ -1,5 +1,6 @@
 // Reads the user's own Gmail inbox (IMAP, read-only) looking for replies from
 // contacts we've emailed, and classifies each with AI.
+import { completeText } from './llm.js';
 
 async function classifyReply(snippet) {
   const prompt = `Classify this email reply to a job outreach email. Reply with ONLY one word: "interested" if they want to talk/interview/schedule a call, "rejected" if they're declining or saying no openings, "auto-reply" if it's an out-of-office/automated bounce/acknowledgement, or "other" for anything else.
@@ -9,31 +10,9 @@ Email:
 ${snippet.slice(0, 1000)}
 """`;
 
-  try {
-    if (process.env.GEMINI_API_KEY) {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
-      const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
-      const word = result.response.text().trim().toLowerCase();
-      if (['interested', 'rejected', 'auto-reply', 'other'].includes(word)) return word;
-    }
-  } catch {}
-
-  try {
-    if (process.env.OPENAI_API_KEY) {
-      const OpenAI = (await import('openai')).default;
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const res = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-      });
-      const word = res.choices[0].message.content.trim().toLowerCase();
-      if (['interested', 'rejected', 'auto-reply', 'other'].includes(word)) return word;
-    }
-  } catch {}
-
+  const raw = await completeText(prompt);
+  const word = (raw || '').trim().toLowerCase().replace(/[^a-z-]/g, '');
+  if (['interested', 'rejected', 'auto-reply', 'other'].includes(word)) return word;
   return 'other';
 }
 

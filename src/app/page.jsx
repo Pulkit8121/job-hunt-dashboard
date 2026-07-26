@@ -33,6 +33,7 @@ export default function Dashboard() {
   const [agentScanning, setAgentScanning] = useState(false);
   const [showLogs, setShowLogs]       = useState(false);
   const [discovering, setDiscovering] = useState(false);
+  const [broadScraping, setBroadScraping] = useState(false);
   const [logsMinimized, setLogsMinimized] = useState(false);
   const [easyApplying, setEasyApplying]   = useState(false);
   const [wfApplying, setWfApplying]       = useState(false);
@@ -97,6 +98,7 @@ export default function Dashboard() {
   async function handleAgentCompany(id)      { setAgentScanning(true); try { await streamScrape('/api/agent',           { companyId:id },     `Agent scanning ${id}...`); }            finally { setAgentScanning(false); } }
   async function handleRefreshCompany(id)    { await streamScrape('/api/scrape', { companyId:id, bust:true }, `Scanning ${id}...`); await load(); }
   async function handleDiscover()            { setDiscovering(true);  try { await streamScrape('/api/discover',         {},                   'Auto-adding companies from Naukri...'); } finally { setDiscovering(false); } }
+  async function handleBroadScrape()         { setBroadScraping(true); try { await streamScrape('/api/naukri-broad-scrape', { pagesPerSearch: 5 }, 'Deep Naukri search (paginated role × city)...'); } finally { setBroadScraping(false); await load(); } }
   async function handleEasyApplyAll()        { setEasyApplying(true); try { await streamScrape('/api/naukri-apply',    {},                   'Naukri Easy Apply — opening browser...'); } finally { setEasyApplying(false); await load(); } }
   async function handleStopNaukri() {
     addLog('⏹ Stopping Naukri apply...');
@@ -168,7 +170,7 @@ export default function Dashboard() {
     return 'text-[#8b949e]';
   }
 
-  const scanBusy = scanning || discovering || agentScanning || liScraping || liConnecting;
+  const scanBusy = scanning || discovering || agentScanning || liScraping || liConnecting || broadScraping;
   const busy = scanBusy || easyApplying || wfApplying;
 
   // ── Applied jobs grouped by company ──────────────────────────────────────────
@@ -258,6 +260,14 @@ export default function Dashboard() {
               title="Auto-add new companies from Naukri">
               <Zap size={12} className={discovering ? 'animate-pulse text-yellow-400' : ''} />
               {discovering ? 'Auto Adding...' : 'Auto Add'}
+            </button>
+
+            <button onClick={handleBroadScrape} disabled={busy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-900/50 hover:bg-teal-800/60
+                text-xs text-teal-100 border border-teal-700/50 transition-colors disabled:opacity-40"
+              title="Paginated role x city search across Naukri — the source of genuinely new listings">
+              <Search size={12} className={broadScraping ? 'animate-pulse text-teal-300' : ''} />
+              {broadScraping ? 'Deep Searching...' : 'Deep Job Search'}
             </button>
 
             <button onClick={handleAgentScan} disabled={busy}

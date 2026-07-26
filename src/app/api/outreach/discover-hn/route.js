@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 import { readOutreachEmails, addOutreachContact } from '@/lib/db';
 import { isExcludedCompany, getExcludedCompanies, isExcludedOutreachCompany, isExcludedOutreachDomain } from '@/lib/exclusions';
 import { scrapeLatestWhoIsHiringThread } from '@/lib/hn-hiring-scraper';
+import { scrapeDirectories } from '@/lib/email-enrichment';
 import { startRun, finishRun, isRunning } from '@/lib/hnDiscoverRunState';
 
 export async function POST() {
@@ -53,7 +54,31 @@ export async function POST() {
         }
       }
 
-      await send(`DONE: Found ${found} new contact(s) from ${contacts.length} listings in "${threadTitle}".`);
+      // Second source: startup/agency directories. Runs only if DIRECTORY_PAGES
+      // is populated — Seedtable/Clutch now block automated access, so by
+      // default this is a no-op rather than a wasted request per run.
+      let dirFound = 0;
+      const dirContacts = await scrapeDirectories({ onProgress: send }).catch(() => []);
+      for (const c of dirContacts) {
+        if (existingEmails.has(c.email.toLowerCase())) continue;
+        if (isExcludedCompany(c.companyName, excluded)) continue;
+        if (isExcludedOutreachCompany(c.companyName)) continue;
+        if (isExcludedOutreachDomain(c.email)) continue;
+
+        const saved = await addOutreachContact({
+          companyName: c.companyName,
+          email: c.email,
+          source: c.source,
+          confidence: 'low', // directory-scraped, not verified as an HR mailbox
+        });
+        if (saved) {
+          dirFound++;
+          existingEmails.add(c.email.toLowerCase());
+          await send(`✓ ${c.companyName} → ${c.email}`);
+        }
+      }
+
+      await send(`DONE: Found ${found} new contact(s) from "${threadTitle}"${dirFound ? ` + ${dirFound} from directories` : ''}.`);
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {

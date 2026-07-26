@@ -13,6 +13,7 @@
 //
 // Only layers 1 and 3 produce new answers; layer 2 just replays them.
 import { PROFILE } from './profile.js';
+import { completeText } from './llm.js';
 
 const PROFILE_ANSWERS = {
   currentCtc: '7',
@@ -116,32 +117,7 @@ async function aiAnswer(question, options) {
     return text.split('\n')[0].slice(0, 120);
   };
 
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
-      const res = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
-      const parsed = tryParse(res.response.text());
-      if (parsed) return parsed;
-    } catch {}
-  }
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const OpenAI = (await import('openai')).default;
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const res = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-      });
-      const parsed = tryParse(res.choices[0].message.content);
-      if (parsed) return parsed;
-    } catch {}
-  }
-
-  return null;
+  return tryParse(await completeText(prompt));
 }
 
 // cache: Map from readAnswerCache(); onResolved({key, question, answer, source})

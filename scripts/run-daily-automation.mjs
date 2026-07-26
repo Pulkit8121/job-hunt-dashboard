@@ -99,6 +99,15 @@ async function main() {
   await sleep(1000);
   await runSseTask('/api/scrape', { companyId: 'all', bust: true }, 'scrape-jobs');
   await sleep(1000);
+  // Broad paginated role x city search. This is what actually surfaces new
+  // listings — the per-company scrape above re-returns the same handful of
+  // results for every company because Naukri ignores its company filter.
+  await runSseTask(
+    '/api/naukri-broad-scrape',
+    { pagesPerSearch: Number(process.env.NAUKRI_BROAD_PAGES) || 5 },
+    'naukri-broad-scrape'
+  );
+  await sleep(1000);
 
   await Promise.all([
     runSseTask('/api/naukri-apply', {}, 'naukri-apply'),

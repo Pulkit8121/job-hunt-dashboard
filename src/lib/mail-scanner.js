@@ -6,6 +6,8 @@
 // contacts — this scans the whole inbox for anything job-related, including
 // inbound recruiter mail and responses to Naukri/company-portal applications
 // that reply-checker.js would never see.
+import { completeText } from './llm.js';
+
 const JOB_KEYWORD_RE = /\b(interview|assessment|online assessment|\boa\b|coding (?:test|challenge)|technical (?:screen|assessment)|hackerrank|codesignal|hirevue|karat|codility|offer letter|congratulations|application (?:received|update|status)|thank you for applying|next steps|recruiter|recruiting|hiring (?:team|manager)|position|job opportunity|role at|shortlisted|move forward|schedule a call|phone screen)\b/i;
 
 function isLikelyJobRelated(subject = '', from = '') {
@@ -26,32 +28,13 @@ Email:
 ${snippet.slice(0, 1500)}
 """`;
 
-  try {
-    if (process.env.GEMINI_API_KEY) {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
-      const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
-      const word = result.response.text().trim().toLowerCase();
-      if (['positive', 'assessment', 'rejected', 'other'].includes(word)) return word;
-    }
-  } catch {}
-
-  try {
-    if (process.env.OPENAI_API_KEY) {
-      const OpenAI = (await import('openai')).default;
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const res = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-      });
-      const word = res.choices[0].message.content.trim().toLowerCase();
-      if (['positive', 'assessment', 'rejected', 'other'].includes(word)) return word;
-    }
-  } catch {}
-
-  return 'other';
+  const raw = await completeText(prompt);
+  const word = (raw || '').trim().toLowerCase().replace(/[^a-z-]/g, '');
+  if (['positive', 'assessment', 'rejected', 'other'].includes(word)) return word;
+  // Distinguish "the model said other" from "no model answered" — the latter
+  // used to be indistinguishable, which is how 111 unclassified emails were
+  // mistaken for 111 confidently-classified ones.
+  return raw ? 'other' : 'unclassified';
 }
 
 async function mapWithConcurrency(items, limit, fn) {
@@ -132,7 +115,8 @@ export async function scanInboxForJobMail({ sinceDays = 30, knownIds = new Set()
     const snippet = (parsed.text || parsed.html || '').slice(0, 2000);
     const category = await classifyJobMail(candidate.subject, snippet);
 
-    const icon = category === 'positive' ? '🎯' : category === 'assessment' ? '📝' : category === 'rejected' ? '✗' : '•';
+    const icon = category === 'positive' ? '🎯' : category === 'assessment' ? '📝'
+      : category === 'rejected' ? '✗' : category === 'unclassified' ? '⚠' : '•';
     onProgress(`${icon} ${candidate.subject.slice(0, 70)} — ${category}`);
 
     return {

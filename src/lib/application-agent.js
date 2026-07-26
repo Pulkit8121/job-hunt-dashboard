@@ -5,6 +5,7 @@
 // here?") fall back to an LLM, reusing the same Gemini→OpenAI pattern as
 // src/lib/ai.js.
 import { PROFILE } from './profile.js';
+import { completeText } from './llm.js';
 
 // Order matters — more specific patterns must come before generic ones that
 // could otherwise over-match (e.g. "location" is generic; "linkedin" isn't).
@@ -73,32 +74,8 @@ Question: "${label}"
 
 Reply with ONLY the answer text (2-4 sentences, first person, no preamble, no markdown).`;
 
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
-      const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
-      const text = result.response.text().trim();
-      if (text) return text;
-    } catch {}
-  }
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const OpenAI = (await import('openai')).default;
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const res = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.4,
-      });
-      const text = res.choices[0].message.content?.trim();
-      if (text) return text;
-    } catch {}
-  }
-
-  return null; // no AI available and no deterministic rule — caller should leave the field blank
+  // null when no provider answered — caller leaves the field blank rather than guess
+  return completeText(prompt, { temperature: 0.4 });
 }
 
 // field: { label, kind: 'text'|'choice', options?: string[] }
