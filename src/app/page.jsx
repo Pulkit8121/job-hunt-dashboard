@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RefreshCw, Plus, Search, Zap, Briefcase, X, Terminal, ChevronDown, ChevronUp, Bot, Send, Users, CheckCircle2, MapPin, ExternalLink, LogOut } from 'lucide-react';
+import { RefreshCw, Plus, Search, Zap, Briefcase, X, Terminal, ChevronDown, ChevronUp, Bot, Send, Users, CheckCircle2, MapPin, ExternalLink, LogOut, Globe2 } from 'lucide-react';
 import CompanyCard from '@/components/CompanyCard';
 import AddCompanyModal from '@/components/AddCompanyModal';
 import OutreachPanel from '@/components/OutreachPanel';
@@ -34,6 +34,7 @@ export default function Dashboard() {
   const [showLogs, setShowLogs]       = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [broadScraping, setBroadScraping] = useState(false);
+  const [atsSweeping, setAtsSweeping] = useState(false);
   const [logsMinimized, setLogsMinimized] = useState(false);
   const [easyApplying, setEasyApplying]   = useState(false);
   const [wfApplying, setWfApplying]       = useState(false);
@@ -98,6 +99,7 @@ export default function Dashboard() {
   async function handleAgentCompany(id)      { setAgentScanning(true); try { await streamScrape('/api/agent',           { companyId:id },     `Agent scanning ${id}...`); }            finally { setAgentScanning(false); } }
   async function handleRefreshCompany(id)    { await streamScrape('/api/scrape', { companyId:id, bust:true }, `Scanning ${id}...`); await load(); }
   async function handleDiscover()            { setDiscovering(true);  try { await streamScrape('/api/discover',         {},                   'Auto-adding companies from Naukri...'); } finally { setDiscovering(false); } }
+  async function handleAtsSweep()             { setAtsSweeping(true); try { await streamScrape('/api/ats-sweep', { recheckTagged: true }, 'Finding company ATS boards (Lever/Ashby/Greenhouse)...'); } finally { setAtsSweeping(false); await load(); } }
   async function handleBroadScrape()         { setBroadScraping(true); try { await streamScrape('/api/naukri-broad-scrape', { pagesPerSearch: 5 }, 'Deep Naukri search (paginated role × city)...'); } finally { setBroadScraping(false); await load(); } }
   async function handleEasyApplyAll()        { setEasyApplying(true); try { await streamScrape('/api/naukri-apply',    {},                   'Naukri Easy Apply — opening browser...'); } finally { setEasyApplying(false); await load(); } }
   async function handleStopNaukri() {
@@ -170,7 +172,7 @@ export default function Dashboard() {
     return 'text-[#8b949e]';
   }
 
-  const scanBusy = scanning || discovering || agentScanning || liScraping || liConnecting || broadScraping;
+  const scanBusy = scanning || discovering || agentScanning || liScraping || liConnecting || broadScraping || atsSweeping;
   const busy = scanBusy || easyApplying || wfApplying;
 
   // ── Applied jobs grouped by company ──────────────────────────────────────────
@@ -268,6 +270,14 @@ export default function Dashboard() {
               title="Paginated role x city search across Naukri — the source of genuinely new listings">
               <Search size={12} className={broadScraping ? 'animate-pulse text-teal-300' : ''} />
               {broadScraping ? 'Deep Searching...' : 'Deep Job Search'}
+            </button>
+
+            <button onClick={handleAtsSweep} disabled={busy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-900/50 hover:bg-indigo-800/60
+                text-xs text-indigo-100 border border-indigo-700/50 transition-colors disabled:opacity-40"
+              title="Detect and verify each company's ATS board, preferring CAPTCHA-free Lever/Ashby">
+              <Globe2 size={12} className={atsSweeping ? 'animate-pulse text-indigo-300' : ''} />
+              {atsSweeping ? 'Finding Boards...' : 'Find ATS Boards'}
             </button>
 
             <button onClick={handleAgentScan} disabled={busy}

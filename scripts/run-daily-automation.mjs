@@ -97,6 +97,10 @@ async function main() {
 
   await runSseTask('/api/discover', {}, 'discover-companies');
   await sleep(1000);
+  // Identify + verify each company's ATS board before the portal apply step,
+  // preferring Lever/Ashby (no CAPTCHA wall) over Greenhouse.
+  await runSseTask('/api/ats-sweep', { limit: 400 }, 'ats-sweep');
+  await sleep(1000);
   await runSseTask('/api/scrape', { companyId: 'all', bust: true }, 'scrape-jobs');
   await sleep(1000);
   // Broad paginated role x city search. This is what actually surfaces new
