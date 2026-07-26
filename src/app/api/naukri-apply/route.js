@@ -1,7 +1,7 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks } from '@/lib/db';
+import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks, readAnswerCache, saveAnswer } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
 import { getBrowser, getReusablePage } from '@/lib/browser';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
@@ -126,6 +126,17 @@ export async function POST(request) {
       const appliedEntries = [];
       const skippedEntries = [];
 
+      // Screening-question agent context: a shared answer cache (so a question
+      // is reasoned about once, then replayed for free on later applications)
+      // plus a persist hook for newly-resolved answers.
+      const answerCache = await readAnswerCache().catch(() => new Map());
+      let aiAnswerCount = 0;
+      const agentCtx = {
+        cache: answerCache,
+        onResolved: async (entry) => { aiAnswerCount++; await saveAnswer(entry).catch(() => {}); },
+      };
+      await send(`🧠 Screening-question agent ready (${answerCache.size} cached answer(s)).`);
+
       for (const job of targets) {
         if (signal.aborted) {
           await send('⏹ Stopped by user.');
@@ -134,7 +145,7 @@ export async function POST(request) {
 
         const companyName = companyMap[job.companyId] || job.companyId;
         await send(`⚡ Applying: ${job.title} at ${companyName}...`);
-        const result = await naukriEasyApply(workPage, job, signal);
+        const result = await naukriEasyApply(workPage, job, signal, agentCtx);
 
         if (result.success) {
           applied++;
@@ -168,6 +179,9 @@ export async function POST(request) {
           } else if (result.reason === 'No Apply button found') {
             skippedEntries.push({ link: linkKey, reason: 'no-apply-button' });
             await send(`✗ No Apply button: ${job.title}`);
+          } else if (result.reason === 'Screening question needs a human answer') {
+            skippedEntries.push({ link: linkKey, reason: 'needs-human-answer' });
+            await send(`🙋 ${job.title}: a screening question needs your answer — skipped for manual apply.`);
           } else {
             await send(`✗ Skipped: ${job.title} — ${result.reason}`);
           }
@@ -192,7 +206,7 @@ export async function POST(request) {
       if (signal.aborted) {
         await send(`STOPPED: Applied to ${applied} jobs before stopping. ${failed} skipped/saved.`);
       } else {
-        await send(`DONE: Applied to ${applied} jobs. ${failed} skipped/saved. Next run will skip those ${failed} automatically.`);
+        await send(`DONE: Applied to ${applied} jobs. ${failed} skipped/saved. ${aiAnswerCount} new screening answer(s) learned and cached. Next run will skip those ${failed} automatically.`);
       }
     } catch (e) {
       await send(`FATAL: ${e.message}`);

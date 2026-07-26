@@ -13,7 +13,7 @@ ${snippet.slice(0, 1000)}
     if (process.env.GEMINI_API_KEY) {
       const { GoogleGenerativeAI } = await import('@google/generative-ai');
       const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const model = genai.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
       const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
       const word = result.response.text().trim().toLowerCase();
       if (['interested', 'rejected', 'auto-reply', 'other'].includes(word)) return word;

@@ -124,6 +124,17 @@ const MailInsightSchema = new mongoose.Schema({
   scannedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
+// Persistent cache of screening-question answers, so a question we've already
+// reasoned about once is answered instantly (and identically) next time
+// instead of burning an LLM call per application.
+const QuestionAnswerSchema = new mongoose.Schema({
+  key:      { type: String, required: true, unique: true }, // question text + option set
+  question: String,
+  answer:   String,
+  source:   String, // 'rule' | 'ai'
+  usedCount:{ type: Number, default: 1 },
+}, { timestamps: true });
+
 const Company        = mongoose.models.Company        || mongoose.model('Company',        CompanySchema);
 const Job            = mongoose.models.Job            || mongoose.model('Job',            JobSchema);
 const LinkedInPerson = mongoose.models.LinkedInPerson  || mongoose.model('LinkedInPerson',  LinkedInPersonSchema);
@@ -131,6 +142,7 @@ const AppliedJob     = mongoose.models.AppliedJob      || mongoose.model('Applie
 const SkippedJob     = mongoose.models.SkippedJob      || mongoose.model('SkippedJob',      SkippedJobSchema);
 const OutreachContact= mongoose.models.OutreachContact || mongoose.model('OutreachContact', OutreachContactSchema);
 const MailInsight    = mongoose.models.MailInsight     || mongoose.model('MailInsight',     MailInsightSchema);
+const QuestionAnswer = mongoose.models.QuestionAnswer  || mongoose.model('QuestionAnswer',  QuestionAnswerSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -173,6 +185,13 @@ function jsonReadOutreach() {
 }
 function jsonWriteOutreach(data) {
   fs.writeFileSync(path.join(DATA_DIR, 'outreach-contacts.json'), JSON.stringify(data, null, 2));
+}
+function jsonReadAnswers() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'question-answers.json'), 'utf-8')); }
+  catch { return []; }
+}
+function jsonWriteAnswers(data) {
+  fs.writeFileSync(path.join(DATA_DIR, 'question-answers.json'), JSON.stringify(data, null, 2));
 }
 function jsonReadMailInsights() {
   try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'mail-insights.json'), 'utf-8')); }
@@ -266,6 +285,42 @@ export async function replaceJobsForCompany(companyId, jobs) {
   await connectDB();
   await Job.deleteMany({ companyId });
   if (jobs.length) await Job.insertMany(jobs);
+}
+
+// Adds jobs without wiping a company's existing ones, deduped by canonical
+// link across the WHOLE collection (not per-company). replaceJobsForCompany
+// stores under the company that was *searched*, which duplicated the same
+// listing under every company whose search returned it — one listing was
+// stored 113 times. Broad-search discovery stores under the company that
+// actually posted the job, so this upsert is keyed on the link alone.
+// Returns the number of genuinely new jobs inserted.
+export async function upsertJobsByLink(jobs) {
+  const canon = (l) => (l || '').split('?')[0];
+  const incoming = [];
+  const seen = new Set();
+  for (const j of jobs) {
+    const key = canon(j.link);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    incoming.push(j);
+  }
+  if (!incoming.length) return 0;
+
+  if (!useMongo) {
+    const all = jsonReadJobs();
+    const existing = new Set(all.map(j => canon(j.link)));
+    const fresh = incoming.filter(j => !existing.has(canon(j.link)));
+    if (fresh.length) jsonWriteJobs([...all, ...fresh]);
+    return fresh.length;
+  }
+
+  await connectDB();
+  const links = incoming.map(j => canon(j.link));
+  const existingDocs = await Job.find({ link: { $in: links } }, 'link').lean();
+  const existing = new Set(existingDocs.map(d => canon(d.link)));
+  const fresh = incoming.filter(j => !existing.has(canon(j.link)));
+  if (fresh.length) await Job.insertMany(fresh, { ordered: false }).catch(() => {});
+  return fresh.length;
 }
 
 export async function updateJob(jobId, companyId, update) {
@@ -446,6 +501,35 @@ export async function deleteOutreachContact(email) {
   }
   await connectDB();
   return OutreachContact.deleteOne({ email: new RegExp(`^${email}$`, 'i') });
+}
+
+// ── Screening-question answer cache ───────────────────────────────────────────
+export async function readAnswerCache() {
+  if (!useMongo) {
+    const map = new Map();
+    for (const a of jsonReadAnswers()) map.set(a.key, a.answer);
+    return map;
+  }
+  await connectDB();
+  const docs = await QuestionAnswer.find().lean();
+  return new Map(docs.map(d => [d.key, d.answer]));
+}
+
+export async function saveAnswer({ key, question, answer, source }) {
+  if (!useMongo) {
+    const all = jsonReadAnswers();
+    const idx = all.findIndex(a => a.key === key);
+    if (idx >= 0) all[idx].usedCount = (all[idx].usedCount || 1) + 1;
+    else all.push({ key, question, answer, source, usedCount: 1 });
+    jsonWriteAnswers(all);
+    return;
+  }
+  await connectDB();
+  await QuestionAnswer.findOneAndUpdate(
+    { key },
+    { $set: { question, answer, source }, $inc: { usedCount: 1 } },
+    { upsert: true }
+  ).catch(() => {});
 }
 
 // ── Mail Insights ─────────────────────────────────────────────────────────────

@@ -1,3 +1,5 @@
+import { resolveAnswer, PROFILE_ANSWERS } from './naukri-question-agent.js';
+
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -258,15 +260,6 @@ export async function naukriLogin(page, email, password) {
   }
 }
 
-const PROFILE_ANSWERS = {
-  currentCtc: '7',
-  expectedCtc: '14',
-  noticePeriod: '15',
-  experience: '2',
-  location: 'Bengaluru',
-  totalExp: '2',
-};
-
 // Fill application form fields — handles React controlled inputs
 async function fillApplicationForm(page) {
   return page.evaluate((answers) => {
@@ -362,14 +355,144 @@ async function fillApplicationForm(page) {
   }, PROFILE_ANSWERS);
 }
 
-// Answer one turn of Naukri's chatbot-style question panel
-// Confirmed selectors from research:
-//   chips:    .ssrc__radio-btn-container (stable BEM prefix, not minified)
-//   chatlist: ul[id*="chatList_"]
-//   question: li.botItem div div span
-//   textArea: div.textArea
-// Returns: 'option_clicked' | 'text_sent' | 'submitted' | 'none'
-async function answerChatbotTurn(page, answers) {
+// Reads the current chatbot turn WITHOUT deciding anything — returns the
+// question text plus whatever answer affordances are on screen, so the
+// decision can be made in Node (where the LLM lives) rather than in-page.
+// Selectors confirmed against Naukri's live DOM and cross-checked with
+// JobSailor's Selenium XPaths.
+async function readChatbotTurn(page) {
+  return page.evaluate(() => {
+    function isVisible(el) {
+      if (!el) return false;
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetParent !== null;
+    }
+
+    let question = '';
+    const chatList = document.querySelector('ul[id*="chatList_"]');
+    if (chatList) {
+      const botItems = chatList.querySelectorAll('li.botItem');
+      if (botItems.length) {
+        const lastBot = botItems[botItems.length - 1];
+        const span = lastBot.querySelector('div > div > span') || lastBot;
+        question = (span.textContent || '').trim();
+      }
+    }
+    if (!question) {
+      const fallback = document.querySelectorAll(
+        '[class*="bot-msg"], [class*="botMsg"], [class*="ssQuestion"], [class*="chatQuestion"]'
+      );
+      question = (fallback[fallback.length - 1]?.textContent || '').trim();
+    }
+
+    const containers = Array.from(document.querySelectorAll('.ssrc__radio-btn-container')).filter(isVisible);
+    const options = containers.map((c, i) => {
+      const lbl = c.querySelector('label');
+      return { index: i, label: ((lbl?.textContent || c.textContent || '').trim()) };
+    }).filter(o => o.label);
+
+    const textArea = document.querySelector('div.textArea');
+    const hasTextArea = isVisible(textArea);
+
+    let hasSubmit = false;
+    const submitPhrases = ['submit application', 'submit', 'apply now', 'confirm', 'finish'];
+    for (const el of document.querySelectorAll('button')) {
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (!el.disabled && isVisible(el) && submitPhrases.some(p => t.includes(p)) && !t.includes('company')) {
+        hasSubmit = true; break;
+      }
+    }
+
+    return { question, options, hasTextArea, hasSubmit };
+  });
+}
+
+// Applies a decided answer. `optionIndex >= 0` clicks that chip; otherwise the
+// text is typed into the chat box and sent.
+async function applyChatbotAnswer(page, { optionIndex, text }) {
+  return page.evaluate((optIdx, val) => {
+    function isVisible(el) {
+      if (!el) return false;
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetParent !== null;
+    }
+    function setReactInput(el, v) {
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    if (optIdx >= 0) {
+      const containers = Array.from(document.querySelectorAll('.ssrc__radio-btn-container')).filter(isVisible);
+      const picked = containers[optIdx];
+      if (!picked) return 'option_missing';
+      const radioInput = picked.querySelector('input');
+      if (radioInput) radioInput.click(); else picked.click();
+      return 'option_clicked';
+    }
+
+    if (val == null || val === '') return 'no_text';
+
+    const textArea = document.querySelector('div.textArea');
+    if (textArea && isVisible(textArea)) {
+      const inner = textArea.querySelector('input, textarea');
+      if (inner) setReactInput(inner, val);
+      else {
+        textArea.textContent = val;
+        textArea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const sendBtn =
+        document.querySelector('[class*="sendBtn"], [class*="send-btn"], [class*="chatSend"]') ||
+        Array.from(document.querySelectorAll('button')).find(b => /send|submit/i.test(b.textContent));
+      if (sendBtn && isVisible(sendBtn)) sendBtn.click();
+      else if (inner) {
+        inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        inner.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
+      }
+      return 'text_sent';
+    }
+
+    const fallbackSelectors = [
+      '[class*="chatInput"] input', '[class*="chat-input"] input',
+      '[class*="ssInput"] input', 'input[placeholder*="type" i]',
+      'input[placeholder*="answer" i]', 'input[placeholder*="enter" i]',
+    ];
+    for (const sel of fallbackSelectors) {
+      const input = document.querySelector(sel);
+      if (!input || !isVisible(input)) continue;
+      setReactInput(input, val);
+      const sendBtn = document.querySelector('[class*="send"], [class*="chatSend"]');
+      if (sendBtn && isVisible(sendBtn)) sendBtn.click();
+      else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      return 'text_sent';
+    }
+    return 'no_input';
+  }, optionIndex ?? -1, text ?? null);
+}
+
+// Clicks the final submit/confirm button if one is showing.
+async function clickChatbotSubmit(page) {
+  return page.evaluate(() => {
+    function isVisible(el) {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetParent !== null;
+    }
+    const phrases = ['submit application', 'submit', 'apply now', 'confirm', 'finish'];
+    for (const el of document.querySelectorAll('button')) {
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (!el.disabled && isVisible(el) && phrases.some(p => t.includes(p)) && !t.includes('company')) {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+// Legacy pure-keyword implementation, retained as the fallback path when no
+// AI key is configured. Returns: 'option_clicked' | 'text_sent' | 'submitted' | 'none'
+async function answerChatbotTurnKeyword(page, answers) {
   return page.evaluate((ans) => {
     function isVisible(el) {
       const s = window.getComputedStyle(el);
@@ -535,8 +658,50 @@ async function answerChatbotTurn(page, answers) {
   }, answers);
 }
 
+// Answers one chatbot turn using the rule → cache → LLM agent. Falls back to
+// the legacy keyword matcher when no AI key is configured, so the flow still
+// works without Gemini/OpenAI credentials.
+// Returns a short status string for logging.
+async function answerChatbotTurn(page, ctx) {
+  const hasAI = !!(process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY);
+  if (!hasAI) return answerChatbotTurnKeyword(page, PROFILE_ANSWERS);
+
+  const state = await readChatbotTurn(page);
+  const options = state.options.map(o => o.label);
+
+  if (!state.question && !options.length && !state.hasTextArea) {
+    if (state.hasSubmit && await clickChatbotSubmit(page)) return 'submitted';
+    return 'none';
+  }
+
+  const { answer, source } = await resolveAnswer({
+    question: state.question,
+    options,
+    cache: ctx?.cache,
+    onResolved: ctx?.onResolved,
+  });
+
+  if (!answer) {
+    // Nothing confidently determined. Submitting a guess here is how the old
+    // implementation silently sent wrong answers — prefer to stop this
+    // application and leave it for manual completion.
+    if (state.hasSubmit && await clickChatbotSubmit(page)) return 'submitted';
+    return 'unanswerable';
+  }
+
+  if (options.length) {
+    const idx = options.indexOf(answer);
+    if (idx < 0) return 'unanswerable';
+    const res = await applyChatbotAnswer(page, { optionIndex: idx });
+    return `${res}[${source}]:${answer.slice(0, 40)}`;
+  }
+
+  const res = await applyChatbotAnswer(page, { optionIndex: -1, text: answer });
+  return `${res}[${source}]:${answer.slice(0, 40)}`;
+}
+
 // Attempt Naukri Easy Apply for a single job. Returns { success, reason, externalUrl? }
-export async function naukriEasyApply(page, job, signal) {
+export async function naukriEasyApply(page, job, signal, ctx) {
   try {
     await prepareNaukriPage(page);
     await page.goto(job.link, { waitUntil: 'domcontentloaded', timeout: 25000 });
@@ -656,7 +821,17 @@ export async function naukriEasyApply(page, job, signal) {
 
       await new Promise(r => setTimeout(r, 1000));
 
-      const action = await withTabCleanup(page, () => answerChatbotTurn(page, PROFILE_ANSWERS));
+      const action = await withTabCleanup(page, () => answerChatbotTurn(page, ctx));
+      ctx?.onTurn?.(action);
+
+      if (action === 'unanswerable') {
+        // The agent had no confident answer. Guessing here is exactly how the
+        // old keyword-only version silently submitted wrong data — bail out and
+        // let this one be finished by hand instead.
+        const s2 = await detectState();
+        if (s2.instantApplied) return { success: true, reason: 'Applied via chatbot' };
+        return { success: false, reason: 'Screening question needs a human answer' };
+      }
 
       if (action === 'none') {
         noneStreak++;
@@ -671,10 +846,10 @@ export async function naukriEasyApply(page, job, signal) {
       await new Promise(r => setTimeout(r, 1000));
     }
 
-    // Final success check
+    // Final success check — only claim success on an explicit confirmation.
     const finalState = await detectState();
     if (finalState.instantApplied) return { success: true, reason: 'Applied via chatbot' };
-    return { success: true, reason: 'Submitted (verify on Naukri profile)' };
+    return { success: false, reason: 'Chatbot ended without a confirmation' };
   } catch (e) {
     return { success: false, reason: e.message };
   }

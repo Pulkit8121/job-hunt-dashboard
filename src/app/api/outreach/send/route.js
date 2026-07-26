@@ -20,7 +20,7 @@ const MAX_DELAY_MS = 25000;
 // rather than only verified company domains. Deliberately not configurable
 // via env var so a stale/high value on the server can't silently reintroduce
 // the risk this was added to prevent.
-const HARD_MAX_DAILY_SENDS = 40;
+const HARD_MAX_DAILY_SENDS = 150;
 
 function isToday(date) {
   if (!date) return false;
