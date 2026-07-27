@@ -27,7 +27,19 @@ const FIELD_RULES = [
   { test: /race|ethnicity/i, value: () => PROFILE.eeo.ethnicity, kind: 'choice' },
   { test: /gender|sex\b/i, value: () => PROFILE.eeo.gender, kind: 'choice' },
   { test: /pronoun/i, value: () => 'He/Him', kind: 'choice' },
-  { test: /sponsor|visa|work authorization|legally (?:able|eligible|authorized)/i, value: () => (PROFILE.eeo.requiresSponsorship ? 'Yes' : 'No'), kind: 'choice' },
+  // "Are you authorized to work?" and "Do you need sponsorship?" are OPPOSITE
+  // in polarity and must not share a rule. They previously did, so both were
+  // answered "Yes" — which asserted US work authorization the applicant does
+  // not have. Answered separately, and country-aware: authorized in India,
+  // not authorized anywhere that would require a visa.
+  {
+    test: /(?:authoriz|eligible|legally able|right to work|permitted to work)[^?]{0,40}\bwork\b|\bwork\b[^?]{0,25}(?:authoriz|eligible)/i,
+    value: (label = '') => (/\bindia\b/i.test(label) ? 'Yes' : 'No'),
+    kind: 'choice',
+  },
+  { test: /sponsor/i, value: () => (PROFILE.eeo.requiresSponsorship ? 'Yes' : 'No'), kind: 'choice' },
+  // Bare "visa status"-style prompts: state the real position rather than a yes/no.
+  { test: /visa/i, value: () => 'Requires sponsorship — Indian citizen, no US work authorization', kind: 'text' },
   { test: /(?:current|preferred)\s*(?:location|city)|based in|where are you located/i, value: () => PROFILE.currentLocation, kind: 'text' },
   { test: /relocat/i, value: () => 'Yes', kind: 'choice' },
   { test: /remote/i, value: () => 'Yes', kind: 'choice' },
@@ -86,7 +98,9 @@ export async function answerField(field, job) {
 
   for (const rule of FIELD_RULES) {
     if (!rule.test.test(label)) continue;
-    const target = rule.value();
+    // Some rules need the question text itself (e.g. work authorization
+    // depends on which country the question is asking about).
+    const target = rule.value(label);
     if (!target) return null;
     if (field.kind === 'choice' && field.options?.length) {
       return matchChoice(field.options, target);
