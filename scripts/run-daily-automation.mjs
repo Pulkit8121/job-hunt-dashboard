@@ -67,6 +67,10 @@ async function runOutreachBranch() {
   await sleep(1000);
   await runSseTask('/api/outreach/discover-hn', {}, 'outreach-discover-hn');
   await sleep(1000);
+  // Free contact sources: GitHub commit mining (also learns each company's
+  // email format), the MCA India registry, and Product Hunt founders.
+  await runSseTask('/api/outreach/discover-sources', { sources: ['github', 'mca', 'producthunt'] }, 'outreach-sources');
+  await sleep(1000);
   await runSseTask('/api/outreach/send', { limit: sendLimit }, 'outreach-send');
 }
 

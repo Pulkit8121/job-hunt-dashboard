@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper } from 'lucide-react';
+import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database } from 'lucide-react';
 
 const STATUS_BADGE = {
   pending: 'bg-gray-700/40 text-gray-300 border-gray-600/40',
@@ -27,6 +27,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
   const [loading, setLoading] = useState(true);
   const [discovering, setDiscovering] = useState(false);
   const [discoveringHn, setDiscoveringHn] = useState(false);
+  const [discoveringSources, setDiscoveringSources] = useState(false);
   const [sending, setSending] = useState(false);
   const [checkingReplies, setCheckingReplies] = useState(false);
   const [testSending, setTestSending] = useState(false);
@@ -62,6 +63,17 @@ export default function OutreachPanel({ streamScrape, busy }) {
       await streamScrape('/api/outreach/discover-hn', {}, 'Scanning latest HN "Who is hiring?" thread...');
     } finally {
       setDiscoveringHn(false);
+      await load();
+    }
+  }
+
+  async function handleDiscoverSources() {
+    setDiscoveringSources(true);
+    try {
+      await streamScrape('/api/outreach/discover-sources', { sources: ['github','mca','producthunt'] },
+        'Mining GitHub commits, MCA India registry and Product Hunt for contacts...');
+    } finally {
+      setDiscoveringSources(false);
       await load();
     }
   }
@@ -173,6 +185,22 @@ export default function OutreachPanel({ streamScrape, busy }) {
               text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg shrink-0">
             <Newspaper size={14} className={discoveringHn ? 'animate-pulse' : ''} />
             {discoveringHn ? 'Scanning thread...' : 'Scan HN Thread'}
+          </button>
+        </div>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-3 border-t border-sky-700/20">
+          <div>
+            <h2 className="text-sm font-bold text-sky-200 flex items-center gap-2">
+              <Database size={14} /> Mine All Free Sources
+            </h2>
+            <p className="text-xs text-sky-100/60 mt-1">
+              Public GitHub commits (real engineer/founder addresses, and learns each company&apos;s email format), the MCA India company registry (Karnataka IT firms), and Product Hunt founders. No paid API needed &mdash; set GITHUB_TOKEN and DATA_GOV_IN_API_KEY for full rate limits.
+            </p>
+          </div>
+          <button onClick={handleDiscoverSources} disabled={busy || discoveringSources}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-violet-700 hover:bg-violet-600
+              text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg shrink-0">
+            <Database size={14} className={discoveringSources ? 'animate-pulse' : ''} />
+            {discoveringSources ? 'Mining sources...' : 'Mine All Sources'}
           </button>
         </div>
       </div>

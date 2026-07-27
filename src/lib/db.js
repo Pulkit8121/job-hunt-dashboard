@@ -51,6 +51,11 @@ const CompanySchema = new mongoose.Schema({
   salaryRange:         String,
   atsType:             { type: String, default: 'naukri' },
   atsSlug:             String,
+  // Email format used org-wide (e.g. 'first.last'), learned from a confirmed
+  // address. Companies use one format throughout, so this lets us address
+  // anyone whose name we know instead of blind-guessing.
+  emailPattern:        String,
+  githubOrg:           String,
   lastScraped:         Date,
   autoDiscovered:      { type: Boolean, default: false },
 }, { timestamps: true });
