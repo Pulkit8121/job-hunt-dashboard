@@ -6,6 +6,7 @@
 // CAPTCHA/bot-challenge.
 import path from 'path';
 import { answerField } from './application-agent.js';
+import { captchaSolver } from './captcha-solver.js';
 
 const RESUME_PATH = process.env.RESUME_PATH || path.join(process.cwd(), 'data', 'resume.pdf');
 const NAV_TIMEOUT = 25000;
@@ -157,7 +158,40 @@ export async function applyToPortalJob(browser, job) {
     await page.waitForSelector('form, input, textarea', { timeout: 10000 }).catch(() => {});
 
     if (await hasCaptcha(page)) {
-      return { success: false, reason: 'captcha-detected', captcha: true };
+      // Initialize CAPTCHA solver - now with nodriver support
+      await captchaSolver.initialize();
+      
+      console.log('🔍 CAPTCHA detected on initial load - attempting to solve');
+      
+      // Try to solve the CAPTCHA using enhanced methods
+      const solution = await captchaSolver.handleCaptcha(page, 'image');
+      
+      if (solution) {
+        console.log('✅ CAPTCHA successfully solved:', solution);
+        
+        // Submit the solution 
+        const submitted = await captchaSolver.submitSolution(page, solution);
+        
+        if (submitted) {
+          console.log('Submitted CAPTCHA solution, continuing with form filling');
+          
+          // Wait for the page to reload after CAPTCHA submission
+          await page.waitForLoadState('networkidle2');
+          
+          // Retry form field extraction after CAPTCHA handling
+          const fields = await extractFields(page);
+          if (!fields.length) {
+            return { success: false, reason: 'no-form-fields-found-after-captcha' };
+          }
+          
+        } else {
+          // If we couldn't submit the solution, still report failure
+          return { success: false, reason: 'captcha-solution-submission-failed', captcha: solution };
+        }
+      } else {
+        console.log('❌ CAPTCHA could not be solved automatically');
+        return { success: false, reason: 'captcha-detected', captcha: true };
+      }
     }
 
     const fields = await extractFields(page);
@@ -190,8 +224,25 @@ export async function applyToPortalJob(browser, job) {
       if (answer) await fillTextField(page, field.refId, answer).catch(() => {});
     }
 
+    // Check for CAPTCHA after filling the form
     if (await hasCaptcha(page)) {
-      return { success: false, reason: 'captcha-detected', captcha: true };
+      console.log('🔍 CAPTCHA detected after form filling - attempting to solve');
+      
+      const solution = await captchaSolver.handleCaptcha(page, 'image');
+      if (solution) {
+        // Submit the solution 
+        const submitted = await captchaSolver.submitSolution(page, solution);
+        
+        if (submitted) {
+          // Wait for page reload with updated state
+          await page.waitForLoadState('networkidle2');
+          console.log('✅ CAPTCHA after form submission solved successfully');
+        } else {
+          return { success: false, reason: 'captcha-solution-submission-failed-post-form', captcha: solution };
+        }
+      } else {
+        return { success: false, reason: 'captcha-detected-post-form', captcha: true };
+      }
     }
 
     const clicked = await findAndClickSubmit(page);
@@ -202,8 +253,22 @@ export async function applyToPortalJob(browser, job) {
     await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 1500));
 
+    // Final CAPTCHA check after submission
     if (await hasCaptcha(page)) {
-      return { success: false, reason: 'captcha-detected-post-submit', captcha: true };
+      console.log('🔍 CAPTCHA detected after form submission - attempting to solve');
+      
+      const solution = await captchaSolver.handleCaptcha(page, 'image');
+      if (solution) {
+        const submitted = await captchaSolver.submitSolution(page, solution);
+        if (submitted) {
+          await page.waitForLoadState('networkidle2');
+          console.log('✅ CAPTCHA after final submission solved successfully');
+        } else {
+          return { success: false, reason: 'captcha-solution-submission-failed-final', captcha: solution };
+        }
+      } else {
+        return { success: false, reason: 'captcha-detected-post-submit', captcha: true };
+      }
     }
 
     const text = await detectOutcomeText(page);

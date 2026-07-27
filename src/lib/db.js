@@ -1,3 +1,4 @@
+// Database connection and data access helpers for JobHuntDashboard
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';

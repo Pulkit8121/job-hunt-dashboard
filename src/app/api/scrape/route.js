@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 import { readCompanies, replaceJobsForCompany, updateCompanyScraped } from '@/lib/db';
 import { scrapeCompany } from '@/lib/scraper';
 import { cacheGet, cacheSet, cacheDel } from '@/lib/cache';
+import { getBrowser } from '@/lib/browser.js';
 
 export async function POST(request) {
   const { companyId, bust } = await request.json();
@@ -15,11 +16,9 @@ export async function POST(request) {
   (async () => {
     let browser;
     try {
-      const puppeteer = (await import('puppeteer')).default;
-      browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      });
+      // Use enhanced browser with anti-detection
+      const browserResult = await getBrowser({ headless: true });
+      browser = browserResult.browser;
 
       const all = await readCompanies();
       const targets = companyId === 'all' ? all : all.filter(c => c.id === companyId);
