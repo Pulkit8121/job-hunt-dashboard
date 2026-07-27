@@ -6,16 +6,34 @@
 // CAPTCHA/bot-challenge.
 import path from 'path';
 import { answerField } from './application-agent.js';
-import { captchaSolver } from './captcha-solver.js';
 
 const RESUME_PATH = process.env.RESUME_PATH || path.join(process.cwd(), 'data', 'resume.pdf');
 const NAV_TIMEOUT = 25000;
 
-async function hasCaptcha(page) {
+// Only an INTERACTIVE, visible challenge actually blocks submission. Greenhouse
+// (and many ATSes) load reCAPTCHA v3, which is passive/invisible score-based and
+// does NOT gate the form — the mere presence of a "recaptcha" script tag is not a
+// challenge. So we look specifically for a visibly-rendered captcha widget (v2
+// checkbox / challenge popup, hCaptcha, Cloudflare Turnstile) or a full-page
+// Cloudflare interstitial. If none is visible, we just submit.
+async function hasBlockingCaptcha(page) {
   return page.evaluate(() => {
-    const html = document.documentElement.innerHTML.toLowerCase();
-    if (html.includes('recaptcha') || html.includes('hcaptcha') || html.includes('cf-turnstile') || html.includes('cf-challenge')) return true;
-    return !!document.querySelector('iframe[src*="captcha" i], iframe[title*="captcha" i], iframe[src*="turnstile" i]');
+    const isVisible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 10 && r.height > 10 &&
+             s.visibility !== 'hidden' && s.display !== 'none' && el.offsetParent !== null;
+    };
+    const widgets = [...document.querySelectorAll(
+      'iframe[src*="recaptcha/api2/anchor" i], iframe[src*="recaptcha/api2/bframe" i],' +
+      'iframe[title*="recaptcha challenge" i], iframe[src*="hcaptcha.com" i],' +
+      'iframe[title*="hcaptcha" i], iframe[src*="challenges.cloudflare.com" i],' +
+      'div.g-recaptcha, div.h-captcha, div.cf-turnstile'
+    )];
+    if (widgets.some(isVisible)) return true;
+    if (/just a moment|checking your browser|attention required|verify you are human/i.test(document.title)) return true;
+    return false;
   }).catch(() => false);
 }
 
@@ -204,41 +222,11 @@ export async function applyToPortalJob(browser, job) {
     // Lever/Ashby posting pages don't carry the form — route to the real apply form.
     await ensureApplyForm(page, job);
 
-    if (await hasCaptcha(page)) {
-      // Initialize CAPTCHA solver - now with nodriver support
-      await captchaSolver.initialize();
-      
-      console.log('🔍 CAPTCHA detected on initial load - attempting to solve');
-      
-      // Try to solve the CAPTCHA using enhanced methods
-      const solution = await captchaSolver.handleCaptcha(page, 'image');
-      
-      if (solution) {
-        console.log('✅ CAPTCHA successfully solved:', solution);
-        
-        // Submit the solution 
-        const submitted = await captchaSolver.submitSolution(page, solution);
-        
-        if (submitted) {
-          console.log('Submitted CAPTCHA solution, continuing with form filling');
-          
-          // Wait for the page to reload after CAPTCHA submission
-          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
-          
-          // Retry form field extraction after CAPTCHA handling
-          const fields = await extractFields(page);
-          if (!fields.length) {
-            return { success: false, reason: 'no-form-fields-found-after-captcha' };
-          }
-          
-        } else {
-          // If we couldn't submit the solution, still report failure
-          return { success: false, reason: 'captcha-solution-submission-failed', captcha: solution };
-        }
-      } else {
-        console.log('❌ CAPTCHA could not be solved automatically');
-        return { success: false, reason: 'captcha-detected', captcha: true };
-      }
+    // A real, interactive challenge (v2 checkbox, hCaptcha, Turnstile, Cloudflare
+    // interstitial) genuinely blocks submission — route it to the manual queue.
+    // Passive reCAPTCHA v3 does not block, so we just proceed and submit.
+    if (await hasBlockingCaptcha(page)) {
+      return { success: false, reason: 'captcha-detected', captcha: true };
     }
 
     const fields = await extractFields(page);
@@ -271,25 +259,9 @@ export async function applyToPortalJob(browser, job) {
       if (answer) await fillTextField(page, field.refId, answer).catch(() => {});
     }
 
-    // Check for CAPTCHA after filling the form
-    if (await hasCaptcha(page)) {
-      console.log('🔍 CAPTCHA detected after form filling - attempting to solve');
-      
-      const solution = await captchaSolver.handleCaptcha(page, 'image');
-      if (solution) {
-        // Submit the solution 
-        const submitted = await captchaSolver.submitSolution(page, solution);
-        
-        if (submitted) {
-          // Wait for page reload with updated state
-          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
-          console.log('✅ CAPTCHA after form submission solved successfully');
-        } else {
-          return { success: false, reason: 'captcha-solution-submission-failed-post-form', captcha: solution };
-        }
-      } else {
-        return { success: false, reason: 'captcha-detected-post-form', captcha: true };
-      }
+    // If filling revealed a real interactive challenge, hand off to manual.
+    if (await hasBlockingCaptcha(page)) {
+      return { success: false, reason: 'captcha-detected-post-form', captcha: true };
     }
 
     const clicked = await findAndClickSubmit(page);
@@ -299,24 +271,6 @@ export async function applyToPortalJob(browser, job) {
 
     await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 1500));
-
-    // Final CAPTCHA check after submission
-    if (await hasCaptcha(page)) {
-      console.log('🔍 CAPTCHA detected after form submission - attempting to solve');
-      
-      const solution = await captchaSolver.handleCaptcha(page, 'image');
-      if (solution) {
-        const submitted = await captchaSolver.submitSolution(page, solution);
-        if (submitted) {
-          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
-          console.log('✅ CAPTCHA after final submission solved successfully');
-        } else {
-          return { success: false, reason: 'captcha-solution-submission-failed-final', captcha: solution };
-        }
-      } else {
-        return { success: false, reason: 'captcha-detected-post-submit', captcha: true };
-      }
-    }
 
     const text = await detectOutcomeText(page);
     const looksSuccessful = /thank you|application (?:received|submitted|complete)|successfully applied|we('| ha)ve received your application/.test(text);
