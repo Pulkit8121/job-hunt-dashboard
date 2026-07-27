@@ -2,7 +2,6 @@
 // Handles CAPTCHA detection/solving and applies to company portals
 
 import { captchaSolver } from './captcha-solver.js';
-import { closeBrowser, getBrowserInstance } from './nodriver-browser.js';
 import { PROFILE } from './profile.js';
 
 // Wellfound profile settings (will be configured once per session).
