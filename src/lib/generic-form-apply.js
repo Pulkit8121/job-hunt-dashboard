@@ -149,6 +149,50 @@ async function detectOutcomeText(page) {
   return page.evaluate(() => document.body.innerText.slice(0, 3000).toLowerCase()).catch(() => '');
 }
 
+function pageHasFillableFields(page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll('input, select, textarea')].some(
+      e => !e.disabled && !['hidden', 'submit', 'button', 'image'].includes(e.type)
+    )
+  ).catch(() => false);
+}
+
+// The discovered job.link is the posting/description page for Lever & Ashby — the
+// actual application form lives elsewhere (Lever: {url}/apply; Ashby: a React
+// route revealed by the "Apply" button). Greenhouse renders the form inline, so
+// this is a no-op there. Navigates/clicks through to a page that actually has
+// fillable fields so the rest of the flow has a form to work with.
+async function ensureApplyForm(page, job) {
+  if (await pageHasFillableFields(page)) return;
+
+  // Lever: application form is a stable /apply sub-path.
+  if (job.atsType === 'lever') {
+    const current = page.url().replace(/\/+$/, '');
+    if (!/\/apply$/.test(current)) {
+      await page.goto(`${current}/apply`, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT }).catch(() => {});
+      await page.waitForSelector('form input, form textarea, input[type="file"]', { timeout: 10000 }).catch(() => {});
+      return;
+    }
+  }
+
+  // Ashby (and any generic posting page): click an Apply/Application control that
+  // routes to or reveals the form, then wait for fields to render.
+  const clicked = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('a, button, [role="button"]')];
+    const el = els.find(e => {
+      const t = (e.textContent || '').trim().toLowerCase();
+      return /^(apply|apply for this job|apply now|application|submit an application|i'?m interested)\b/.test(t);
+    });
+    if (el) { el.click(); return true; }
+    return false;
+  }).catch(() => false);
+
+  if (clicked) {
+    await page.waitForSelector('form input, form textarea, input[type="file"]', { timeout: 12000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
 // Returns { success, reason, captcha? }
 export async function applyToPortalJob(browser, job) {
   const page = await browser.newPage();
@@ -156,6 +200,9 @@ export async function applyToPortalJob(browser, job) {
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.goto(job.link, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
     await page.waitForSelector('form, input, textarea', { timeout: 10000 }).catch(() => {});
+
+    // Lever/Ashby posting pages don't carry the form — route to the real apply form.
+    await ensureApplyForm(page, job);
 
     if (await hasCaptcha(page)) {
       // Initialize CAPTCHA solver - now with nodriver support
@@ -176,7 +223,7 @@ export async function applyToPortalJob(browser, job) {
           console.log('Submitted CAPTCHA solution, continuing with form filling');
           
           // Wait for the page to reload after CAPTCHA submission
-          await page.waitForLoadState('networkidle2');
+          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
           
           // Retry form field extraction after CAPTCHA handling
           const fields = await extractFields(page);
@@ -235,7 +282,7 @@ export async function applyToPortalJob(browser, job) {
         
         if (submitted) {
           // Wait for page reload with updated state
-          await page.waitForLoadState('networkidle2');
+          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
           console.log('✅ CAPTCHA after form submission solved successfully');
         } else {
           return { success: false, reason: 'captcha-solution-submission-failed-post-form', captcha: solution };
@@ -261,7 +308,7 @@ export async function applyToPortalJob(browser, job) {
       if (solution) {
         const submitted = await captchaSolver.submitSolution(page, solution);
         if (submitted) {
-          await page.waitForLoadState('networkidle2');
+          await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
           console.log('✅ CAPTCHA after final submission solved successfully');
         } else {
           return { success: false, reason: 'captcha-solution-submission-failed-final', captcha: solution };
