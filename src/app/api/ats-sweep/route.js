@@ -25,7 +25,7 @@ export async function POST(request) {
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
-  const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`));
+  const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`)).catch(() => {});
 
   if (isRunning()) {
     await send('⚠ An ATS sweep is already running. Skipping this trigger.');

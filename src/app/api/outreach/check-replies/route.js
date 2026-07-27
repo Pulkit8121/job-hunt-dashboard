@@ -8,7 +8,7 @@ export async function POST() {
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
-  const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`));
+  const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`)).catch(() => {});
 
   (async () => {
     try {
