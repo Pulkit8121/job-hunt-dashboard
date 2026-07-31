@@ -3,7 +3,9 @@ export const dynamic = 'force-dynamic';
 
 import { readOutreachContacts, updateOutreachContact } from '@/lib/db';
 import { generateCoverLetter } from '@/lib/cover-letter';
-import { sendOutreachEmail, sleep } from '@/lib/mailer';
+import { sendOutreachEmail, sleep, classifySendError } from '@/lib/mailer';
+
+const MAX_TRANSIENT_RETRIES = 3;
 import { startRun, finishRun, isRunning } from '@/lib/outreachRunState';
 import { isExcludedOutreachDomain } from '@/lib/exclusions';
 
@@ -101,6 +103,28 @@ export async function POST(request) {
         } catch (e) {
           failed++;
           await send(`✗ Failed for ${contact.companyName} (${contact.email}): ${e.message}`);
+
+          const kind = classifySendError(e);
+          if (kind === 'quota') {
+            await send('⛔ Gmail daily sending limit reached — stopping this run. Will resume once the cap resets tomorrow.');
+            break;
+          }
+
+          if (kind === 'permanent') {
+            await updateOutreachContact(contact.email, { status: 'bounced', lastFailReason: e.message.slice(0, 300) });
+            await send(`  ⊘ Undeliverable address — marked bounced, won't retry.`);
+          } else {
+            const failCount = (contact.failCount || 0) + 1;
+            if (failCount >= MAX_TRANSIENT_RETRIES) {
+              await updateOutreachContact(contact.email, {
+                status: 'bounced',
+                lastFailReason: `Gave up after ${failCount} failures: ${e.message.slice(0, 200)}`,
+              });
+              await send(`  ⊘ Failed ${failCount} times — giving up, marked bounced.`);
+            } else {
+              await updateOutreachContact(contact.email, { failCount, lastFailReason: e.message.slice(0, 300) });
+            }
+          }
         }
 
         if (signal.aborted) {

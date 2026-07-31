@@ -135,6 +135,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
     total: contacts.length,
     pending: contacts.filter(c => c.status === 'pending').length,
     sent: contacts.filter(c => c.status === 'sent').length,
+    bounced: contacts.filter(c => c.status === 'bounced').length,
     replied: contacts.filter(c => !!c.replyStatus).length,
     awaitingReply: contacts.filter(c => c.status === 'sent' && !c.replyStatus).length,
     interested: contacts.filter(c => c.replyStatus === 'interested').length,
@@ -262,6 +263,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
           <Stat label="Contacts" value={stats.total} color="text-sky-300" />
           <Stat label="Pending" value={stats.pending} color="text-gray-300" />
           <Stat label="Sent" value={stats.sent} color="text-blue-300" />
+          <Stat label="Bounced" value={stats.bounced} color="text-red-400" />
           <Stat label="Replied" value={stats.replied} color="text-amber-300" />
           <Stat label="Awaiting" value={stats.awaitingReply} color="text-gray-400" />
           <Stat label="Interested" value={stats.interested} color="text-emerald-300" />
@@ -306,7 +308,8 @@ export default function OutreachPanel({ streamScrape, busy }) {
                     <span className={CONFIDENCE_COLOR[c.confidence] || 'text-gray-400'}>{c.source}</span>
                   </td>
                   <td className="px-4 py-2">
-                    <span className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_BADGE[c.status] || STATUS_BADGE.pending}`}>
+                    <span className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_BADGE[c.status] || STATUS_BADGE.pending}`}
+                      title={c.status === 'bounced' ? (c.lastFailReason || '') : ''}>
                       {c.status}
                     </span>
                   </td>

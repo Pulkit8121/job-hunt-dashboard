@@ -51,3 +51,26 @@ export async function sendOutreachEmail({ to, subject, text, html }) {
 export function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// Classifies an SMTP send failure so the caller knows how to react:
+//   'quota'     — OUR account hit Gmail's daily sending limit. Not the
+//                 recipient's fault; every remaining send this run will fail
+//                 identically, so the caller should stop the whole run rather
+//                 than keep burning through the queue.
+//   'permanent' — the recipient address itself is bad (doesn't exist, mailbox
+//                 rejected, etc.) — retrying will never succeed.
+//   'transient' — anything else (network blip, temporary greylisting) — worth
+//                 retrying a bounded number of times, not forever.
+export function classifySendError(err) {
+  const msg = (err?.message || err?.response || '').toLowerCase();
+
+  if (/daily user sending limit exceeded|550-5\.4\.5/.test(msg)) {
+    return 'quota';
+  }
+
+  if (/no such user|user unknown|mailbox unavailable|mailbox not found|does not exist|address rejected|recipient rejected|invalid recipient|mailbox name not allowed|no mailbox|550 5\.1\.|551 |553 /.test(msg)) {
+    return 'permanent';
+  }
+
+  return 'transient';
+}

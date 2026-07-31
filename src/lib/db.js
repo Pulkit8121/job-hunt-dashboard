@@ -114,6 +114,8 @@ const OutreachContactSchema = new mongoose.Schema({
   status:       { type: String, default: 'pending' }, // pending | sent | skipped | bounced
   sentAt:       Date,
   coverLetter:  String,
+  failCount:    { type: Number, default: 0 },
+  lastFailReason: String,
   replyStatus:  String,  // interested | rejected | auto-reply | other
   replySnippet: String,
   repliedAt:    Date,
