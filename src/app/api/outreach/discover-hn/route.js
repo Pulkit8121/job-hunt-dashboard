@@ -1,11 +1,14 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { readOutreachEmails, addOutreachContact } from '@/lib/db';
+import { readOutreachEmails, addOutreachContact, readCompanies, addCompany } from '@/lib/db';
 import { isExcludedCompany, getExcludedCompanies, isExcludedOutreachCompany, isExcludedOutreachDomain } from '@/lib/exclusions';
-import { scrapeLatestWhoIsHiringThread } from '@/lib/hn-hiring-scraper';
+import { scrapeRecentWhoIsHiringThreads } from '@/lib/hn-hiring-scraper';
 import { scrapeDirectories } from '@/lib/email-enrichment';
+import { slugifyCompanyId, buildCompanyRecord } from '@/lib/company-utils';
 import { startRun, finishRun, isRunning } from '@/lib/hnDiscoverRunState';
+
+const MONTHS_BACK = Number(process.env.HN_MONTHS_BACK) || 6;
 
 export async function POST() {
   const encoder = new TextEncoder();
@@ -26,23 +29,38 @@ export async function POST() {
     try {
       const existingEmails = await readOutreachEmails();
       const excluded = getExcludedCompanies();
+      const existingCompanies = await readCompanies();
+      const companyIds = new Set(existingCompanies.map(c => c.id));
 
-      await send('ℹ Fetching latest HN "Who is hiring?" thread...');
-      const { threadTitle, contacts } = await scrapeLatestWhoIsHiringThread();
-      if (!threadTitle) {
-        await send('DONE: Could not find a "Who is hiring?" thread.');
+      await send(`ℹ Fetching the last ${MONTHS_BACK} HN "Who is hiring?" threads...`);
+      const { threads, contacts } = await scrapeRecentWhoIsHiringThreads(MONTHS_BACK);
+      if (!threads?.length) {
+        await send('DONE: Could not find any "Who is hiring?" threads.');
         return;
       }
-      await send(`ℹ Found "${threadTitle}" with ${contacts.length} candidate contact(s). Filtering and saving...`);
+      await send(`ℹ Scanned ${threads.length} thread(s): ${threads.join(', ')}. ${contacts.length} candidate contact(s) found. Filtering and saving...`);
 
       let found = 0;
+      const regionCounts = { us: 0, europe: 0, remote: 0, other: 0 };
       for (const contact of contacts) {
         if (existingEmails.has(contact.email.toLowerCase())) continue;
         if (isExcludedCompany(contact.companyName, excluded)) continue;
         if (isExcludedOutreachCompany(contact.companyName)) continue;
         if (isExcludedOutreachDomain(contact.email)) continue;
 
+        const companyId = slugifyCompanyId(contact.companyName);
+        if (companyId && !companyIds.has(companyId)) {
+          const company = buildCompanyRecord({
+            name: contact.companyName,
+            locations: contact.location ? [contact.location] : ['Remote'],
+            autoDiscovered: true,
+          });
+          await addCompany(company).catch(() => {});
+          companyIds.add(companyId);
+        }
+
         const saved = await addOutreachContact({
+          companyId: companyId || undefined,
           companyName: contact.companyName,
           email: contact.email,
           source: 'hn-hiring',
@@ -50,7 +68,8 @@ export async function POST() {
         });
         if (saved) {
           found++;
-          await send(`✓ ${contact.companyName} → ${contact.email}`);
+          regionCounts[contact.region || 'other']++;
+          await send(`✓ [${(contact.region || 'other').toUpperCase()}] ${contact.companyName} (${contact.location || 'unknown location'}) → ${contact.email}`);
         }
       }
 
@@ -78,7 +97,7 @@ export async function POST() {
         }
       }
 
-      await send(`DONE: Found ${found} new contact(s) from "${threadTitle}"${dirFound ? ` + ${dirFound} from directories` : ''}.`);
+      await send(`DONE: Found ${found} new contact(s) across ${threads.length} thread(s) (US: ${regionCounts.us}, Europe: ${regionCounts.europe}, Remote: ${regionCounts.remote}, Other: ${regionCounts.other})${dirFound ? ` + ${dirFound} from directories` : ''}.`);
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {

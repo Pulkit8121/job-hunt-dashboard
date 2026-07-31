@@ -15,6 +15,15 @@ const ITEM_API = 'https://hn.algolia.com/api/v1/items';
 const FETCH_TIMEOUT = 15000;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// HN's "Who is hiring?" threads occasionally get individual candidates
+// posting themselves (in the wrong thread — "Who wants to be hired?" is a
+// separate monthly thread) rather than a company describing an open role.
+// The distinguishing signal is the post's OPENING words: a company says
+// "X is looking for a developer" / "We're hiring a designer" (role-first),
+// while a candidate leads with "SEEKING ..." / "Looking for work" about
+// themselves. Checking only the first ~20 chars avoids false-positiving on
+// "Foo is looking for a CTO", which contains "looking for" much later.
+const JOB_SEEKER_OPENER = /^(seeking( work| a role| opportunities)?\b|looking for (work|a job|remote work)\b|available for hire\b|open to work\b)/i;
 const JUNK_LOCAL = ['noreply', 'no-reply', 'donotreply', 'example'];
 const JUNK_DOMAINS = ['example.com', 'sentry.io', 'schema.org', 'w3.org'];
 // Asset/code-snippet extensions that regularly false-positive-match the email
@@ -52,38 +61,86 @@ function extractCompanyName(text) {
   return snippet || "HN Who's Hiring contact";
 }
 
+// Best-effort region classification — not a geo database, just keyword
+// matching. HN listing formats aren't consistent enough to rely on a fixed
+// pipe-field position for location (some posters put it 2nd, some 3rd, some
+// skip it entirely and put the role there instead) — so this scans the WHOLE
+// listing text for region signals rather than guessing a single field index.
+const US_HINTS = /\b(usa|u\.s\.a?\.?|united states|san francisco|new york|nyc|seattle|austin|boston|chicago|los angeles|denver|remote \(?us\)?|\b(ca|ny|wa|tx|ma|il|co|fl|ga|nc|va|oh|pa|az|mi|nj)\b)/i;
+const EUROPE_HINTS = /\b(uk|united kingdom|london|england|germany|berlin|munich|france|paris|netherlands|amsterdam|spain|madrid|barcelona|italy|milan|sweden|stockholm|switzerland|zurich|ireland|dublin|portugal|lisbon|poland|warsaw|europe|eu\b|remote \(?eu\)?)/i;
+// A pipe-delimited field "looks like" a location if it matches a region hint
+// or the common "City, ST"/"City, Country" shape — used only to pick which
+// field to show as the display location, not for region classification.
+const LOOKS_LIKE_LOCATION = /remote|^[A-Z][a-z]+(?:[ .][A-Z][a-z]+)*,\s*[A-Z]{2,}$/;
+
+function extractLocationAndRegion(text) {
+  let region = 'other';
+  if (US_HINTS.test(text)) region = 'us';
+  else if (EUROPE_HINTS.test(text)) region = 'europe';
+  else if (/\bremote\b/i.test(text)) region = 'remote';
+
+  const parts = text.split(/ \| /).map(s => s.trim());
+  const locationField = parts.slice(1, 4).find(p => LOOKS_LIKE_LOCATION.test(p) || US_HINTS.test(p) || EUROPE_HINTS.test(p))
+    || (parts.length > 1 ? parts[1] : '');
+  return { location: locationField.slice(0, 80) || null, region };
+}
+
 async function fetchJson(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT) });
   if (!res.ok) throw new Error(`HN API ${res.status} for ${url}`);
   return res.json();
 }
 
-async function findLatestThreadId() {
+// Returns up to `count` monthly "Who is hiring?" threads, most recent first.
+async function findRecentThreadIds(count) {
   const data = await fetchJson(SEARCH_API);
-  const thread = (data.hits || []).find(h => /^ask hn:\s*who is hiring/i.test(h.title || ''));
-  return thread ? { id: thread.objectID, title: thread.title } : null;
+  return (data.hits || [])
+    .filter(h => /^ask hn:\s*who is hiring/i.test(h.title || ''))
+    .slice(0, count)
+    .map(h => ({ id: h.objectID, title: h.title }));
 }
 
-// Returns { threadTitle, contacts: [{ companyName, email }] } — one contact
-// per top-level comment that contains a plausible email (replies/questions
-// nested under a listing are ignored, only the original poster's own comment
-// counts). Emails are de-duplicated across the whole thread.
-export async function scrapeLatestWhoIsHiringThread() {
-  const thread = await findLatestThreadId();
-  if (!thread) return { threadTitle: null, contacts: [] };
-
+async function scrapeThread(thread) {
   const item = await fetchJson(`${ITEM_API}/${thread.id}`);
   const topLevelComments = (item.children || []).filter(c => c && !c.dead && !c.deleted && c.text);
 
-  const seen = new Set();
   const contacts = [];
   for (const comment of topLevelComments) {
     const text = stripHtml(comment.text);
+    if (JOB_SEEKER_OPENER.test(text)) continue; // candidate post, not a company
     const email = [...text.matchAll(EMAIL_RE)].map(m => m[0].toLowerCase()).find(e => !isJunkEmail(e));
-    if (!email || seen.has(email)) continue;
-    seen.add(email);
-    contacts.push({ companyName: extractCompanyName(text), email });
+    if (!email) continue;
+    const { location, region } = extractLocationAndRegion(text);
+    contacts.push({ companyName: extractCompanyName(text), email, location, region, threadTitle: thread.title });
   }
+  return contacts;
+}
 
+// Returns { threadTitle, contacts } for just the latest thread — kept for
+// backwards compatibility with existing callers.
+export async function scrapeLatestWhoIsHiringThread() {
+  const [thread] = await findRecentThreadIds(1);
+  if (!thread) return { threadTitle: null, contacts: [] };
+  const contacts = await scrapeThread(thread);
   return { threadTitle: thread.title, contacts };
+}
+
+// Returns { threads: [{title}], contacts: [{ companyName, email, location, region, threadTitle }] }
+// across the last `monthsBack` monthly threads (default 6) — one contact per
+// top-level comment with a plausible email, de-duplicated by email across ALL
+// threads combined (so re-running months later doesn't re-surface the same
+// still-open listing under a different month).
+export async function scrapeRecentWhoIsHiringThreads(monthsBack = 6) {
+  const threads = await findRecentThreadIds(monthsBack);
+  const seen = new Set();
+  const contacts = [];
+  for (const thread of threads) {
+    const threadContacts = await scrapeThread(thread).catch(() => []);
+    for (const c of threadContacts) {
+      if (seen.has(c.email)) continue;
+      seen.add(c.email);
+      contacts.push(c);
+    }
+  }
+  return { threads: threads.map(t => t.title), contacts };
 }
