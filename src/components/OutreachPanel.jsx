@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database, Rocket } from 'lucide-react';
 
 const STATUS_BADGE = {
@@ -22,6 +22,8 @@ const CONFIDENCE_COLOR = {
   low:    'text-red-400',
 };
 
+const TABLE_PAGE_SIZE = 100;
+
 export default function OutreachPanel({ streamScrape, busy }) {
   const [contacts, setContacts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -34,6 +36,9 @@ export default function OutreachPanel({ streamScrape, busy }) {
   const [testSending, setTestSending] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [cap, setCap] = useState(175);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [visibleCount, setVisibleCount] = useState(TABLE_PAGE_SIZE);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -143,7 +148,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
     setContacts(prev => prev.filter(c => c.email !== email));
   }
 
-  const stats = {
+  const stats = useMemo(() => ({
     total: contacts.length,
     pending: contacts.filter(c => c.status === 'pending').length,
     sent: contacts.filter(c => c.status === 'sent').length,
@@ -152,7 +157,23 @@ export default function OutreachPanel({ streamScrape, busy }) {
     awaitingReply: contacts.filter(c => c.status === 'sent' && !c.replyStatus).length,
     interested: contacts.filter(c => c.replyStatus === 'interested').length,
     rejected: contacts.filter(c => c.replyStatus === 'rejected').length,
-  };
+  }), [contacts]);
+
+  // With thousands of contacts, rendering the full list unconditionally
+  // crashes the tab — filter by status + search text, then paginate what's
+  // actually shown so the DOM never holds more than a page at a time.
+  const filteredContacts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return contacts.filter(c => {
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+      if (!q) return true;
+      return c.companyName?.toLowerCase().includes(q) || c.email?.toLowerCase().includes(q);
+    });
+  }, [contacts, search, statusFilter]);
+
+  const visibleContacts = filteredContacts.slice(0, visibleCount);
+
+  useEffect(() => { setVisibleCount(TABLE_PAGE_SIZE); }, [search, statusFilter]);
 
   return (
     <div className="space-y-6">
@@ -315,6 +336,35 @@ export default function OutreachPanel({ streamScrape, busy }) {
           <p className="text-xs mt-2 opacity-60">Click "Discover Contacts" above to start.</p>
         </div>
       ) : (
+        <div className="space-y-3">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {['all', 'pending', 'sent', 'bounced', 'skipped'].map(s => (
+                <button key={s} onClick={() => setStatusFilter(s)}
+                  className={`px-2.5 py-1 rounded-full text-xs transition-colors border ${
+                    statusFilter === s
+                      ? 'bg-sky-800/60 text-sky-200 border-sky-600/60'
+                      : 'bg-[#21262d] text-[#8b949e] border-[#30363d] hover:text-[#e6edf3]'
+                  }`}>
+                  {s === 'all' ? `All (${stats.total})` : `${s} (${stats[s] ?? contacts.filter(c => c.status === s).length})`}
+                </button>
+              ))}
+            </div>
+            <div className="relative w-full sm:w-64">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8b949e]" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter by company or email..."
+                className="w-full pl-9 pr-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-sm text-[#e6edf3] placeholder-[#484f58] focus:outline-none focus:border-sky-600"
+              />
+            </div>
+          </div>
+
+          {filteredContacts.length === 0 ? (
+            <p className="text-sm text-[#8b949e] py-8 text-center">No contacts match this filter.</p>
+          ) : (
         <div className="rounded-xl border border-[#30363d] bg-[#161b22] overflow-hidden overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -328,7 +378,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#21262d]">
-              {contacts.map((c) => (
+              {visibleContacts.map((c) => (
                 <tr key={c.email}>
                   <td className="px-4 py-2 text-[#e6edf3]">{c.companyName}</td>
                   <td className="px-4 py-2 text-[#8b949e]">{c.email}</td>
@@ -359,6 +409,18 @@ export default function OutreachPanel({ streamScrape, busy }) {
               ))}
             </tbody>
           </table>
+        </div>
+          )}
+
+          <div className="flex items-center justify-between text-xs text-[#8b949e]">
+            <span>Showing {visibleContacts.length} of {filteredContacts.length}{filteredContacts.length !== contacts.length ? ` (filtered from ${contacts.length})` : ''}</span>
+            {visibleCount < filteredContacts.length && (
+              <button onClick={() => setVisibleCount(v => v + TABLE_PAGE_SIZE)}
+                className="px-3 py-1.5 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] hover:text-[#e6edf3] border border-[#30363d] transition-colors">
+                Load {Math.min(TABLE_PAGE_SIZE, filteredContacts.length - visibleCount)} more
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
