@@ -116,13 +116,19 @@ export default function Dashboard() {
     ]);
   }
 
-  const jobsByCompany     = {};
+  // Object.create(null) — not {} — since these are keyed by a slugified
+  // company name (e.g. "constructor" for a company literally named
+  // "Constructor"), which can collide with inherited Object.prototype
+  // properties. A plain {} lookup would then return the inherited function
+  // instead of undefined, silently breaking the `|| []` fallback everywhere
+  // below and crashing with "X.filter is not a function".
+  const jobsByCompany     = Object.create(null);
   for (const job of jobs) { if (!jobsByCompany[job.companyId]) jobsByCompany[job.companyId] = []; jobsByCompany[job.companyId].push(job); }
 
-  const peopleByCompany   = {};
+  const peopleByCompany   = Object.create(null); // see jobsByCompany comment above
   for (const p of people) { if (!peopleByCompany[p.companyId]) peopleByCompany[p.companyId] = []; peopleByCompany[p.companyId].push(p); }
 
-  const visibleJobsByCompany = {};
+  const visibleJobsByCompany = Object.create(null); // see jobsByCompany comment above
   for (const company of companies) {
     const cj = jobsByCompany[company.id] || [];
     visibleJobsByCompany[company.id] = jobView === 'low-match'
@@ -176,7 +182,7 @@ export default function Dashboard() {
   const busy = scanBusy || easyApplying || wfApplying;
 
   // ── Applied jobs grouped by company ──────────────────────────────────────────
-  const appliedByCompany = {};
+  const appliedByCompany = Object.create(null); // see jobsByCompany comment above
   for (const a of applied) {
     if (!appliedByCompany[a.companyId]) appliedByCompany[a.companyId] = { name: a.companyName, jobs: [] };
     appliedByCompany[a.companyId].jobs.push(a);
