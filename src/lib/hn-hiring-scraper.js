@@ -92,12 +92,26 @@ async function fetchJson(url) {
 }
 
 // Returns up to `count` monthly "Who is hiring?" threads, most recent first.
+// The bot account also posts "Who wants to be hired?" and "Freelancer? Seeking
+// freelancer?" on the same schedule, so a single page of results (Algolia's
+// default hitsPerPage) often contains too few actual "who is hiring" matches —
+// paginate until we have enough or run out of pages.
+const HITS_PER_PAGE = 50;
+const MAX_PAGES = 10; // covers ~500 stories across all 3 monthly thread types
+
 async function findRecentThreadIds(count) {
-  const data = await fetchJson(SEARCH_API);
-  return (data.hits || [])
-    .filter(h => /^ask hn:\s*who is hiring/i.test(h.title || ''))
-    .slice(0, count)
-    .map(h => ({ id: h.objectID, title: h.title }));
+  const matches = [];
+  for (let page = 0; page < MAX_PAGES && matches.length < count; page++) {
+    const data = await fetchJson(`${SEARCH_API}&hitsPerPage=${HITS_PER_PAGE}&page=${page}`);
+    const hits = data.hits || [];
+    for (const h of hits) {
+      if (/^ask hn:\s*who is hiring/i.test(h.title || '')) {
+        matches.push({ id: h.objectID, title: h.title });
+      }
+    }
+    if (page + 1 >= (data.nbPages || 1)) break;
+  }
+  return matches.slice(0, count);
 }
 
 async function scrapeThread(thread) {

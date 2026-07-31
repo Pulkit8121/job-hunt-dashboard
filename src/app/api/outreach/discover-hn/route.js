@@ -8,9 +8,11 @@ import { scrapeDirectories } from '@/lib/email-enrichment';
 import { slugifyCompanyId, buildCompanyRecord } from '@/lib/company-utils';
 import { startRun, finishRun, isRunning } from '@/lib/hnDiscoverRunState';
 
-const MONTHS_BACK = Number(process.env.HN_MONTHS_BACK) || 6;
+const DEFAULT_MONTHS_BACK = Number(process.env.HN_MONTHS_BACK) || 6;
 
-export async function POST() {
+export async function POST(request) {
+  const { monthsBack = DEFAULT_MONTHS_BACK } = await request.json().catch(() => ({}));
+
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
@@ -32,8 +34,8 @@ export async function POST() {
       const existingCompanies = await readCompanies();
       const companyIds = new Set(existingCompanies.map(c => c.id));
 
-      await send(`ℹ Fetching the last ${MONTHS_BACK} HN "Who is hiring?" threads...`);
-      const { threads, contacts } = await scrapeRecentWhoIsHiringThreads(MONTHS_BACK);
+      await send(`ℹ Fetching the last ${monthsBack} HN "Who is hiring?" threads...`);
+      const { threads, contacts } = await scrapeRecentWhoIsHiringThreads(monthsBack);
       if (!threads?.length) {
         await send('DONE: Could not find any "Who is hiring?" threads.');
         return;

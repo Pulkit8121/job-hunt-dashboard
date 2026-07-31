@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database } from 'lucide-react';
+import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database, Rocket } from 'lucide-react';
 
 const STATUS_BADGE = {
   pending: 'bg-gray-700/40 text-gray-300 border-gray-600/40',
@@ -28,6 +28,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
   const [discovering, setDiscovering] = useState(false);
   const [discoveringHn, setDiscoveringHn] = useState(false);
   const [discoveringSources, setDiscoveringSources] = useState(false);
+  const [discoveringYc, setDiscoveringYc] = useState(false);
   const [sending, setSending] = useState(false);
   const [checkingReplies, setCheckingReplies] = useState(false);
   const [testSending, setTestSending] = useState(false);
@@ -74,6 +75,17 @@ export default function OutreachPanel({ streamScrape, busy }) {
         'Mining GitHub commits, MCA India registry and Product Hunt for contacts...');
     } finally {
       setDiscoveringSources(false);
+      await load();
+    }
+  }
+
+  async function handleDiscoverYc() {
+    setDiscoveringYc(true);
+    try {
+      await streamScrape('/api/outreach/discover-yc', { cap: 200, onlyHiring: true },
+        'Scanning Y Combinator companies (US/Europe/global startups) for contacts...');
+    } finally {
+      setDiscoveringYc(false);
       await load();
     }
   }
@@ -202,6 +214,22 @@ export default function OutreachPanel({ streamScrape, busy }) {
               text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg shrink-0">
             <Database size={14} className={discoveringSources ? 'animate-pulse' : ''} />
             {discoveringSources ? 'Mining sources...' : 'Mine All Sources'}
+          </button>
+        </div>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-3 border-t border-sky-700/20">
+          <div>
+            <h2 className="text-sm font-bold text-sky-200 flex items-center gap-2">
+              <Rocket size={14} /> Y Combinator Companies (US / Europe / Global)
+            </h2>
+            <p className="text-xs text-sky-100/60 mt-1">
+              YC&apos;s own public company directory (4,200+ active, 1,480+ currently hiring) &mdash; their real website is already known, so this skips search entirely and crawls directly for a contact.
+            </p>
+          </div>
+          <button onClick={handleDiscoverYc} disabled={busy || discoveringYc}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-orange-700 hover:bg-orange-600
+              text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg shrink-0">
+            <Rocket size={14} className={discoveringYc ? 'animate-pulse' : ''} />
+            {discoveringYc ? 'Scanning YC...' : 'Scan YC Companies'}
           </button>
         </div>
       </div>
