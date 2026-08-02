@@ -880,6 +880,7 @@ export async function naukriEasyApply(page, job, signal, ctx) {
 
       const action = await withTabCleanup(page, () => answerChatbotTurn(page, ctx));
       ctx?.onTurn?.(action);
+      if (process.env.NAUKRI_DEBUG === 'true') console.error(`[naukri-debug] turn ${turns} action=${action}`);
 
       if (action === 'unanswerable') {
         // The agent had no confident answer. Guessing here is exactly how the

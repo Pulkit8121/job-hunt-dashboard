@@ -52,10 +52,17 @@ export const PROFILE = {
   ],
   scrapeRoles: [
     { slug: 'software-engineer', label: 'Software Engineer' },
+    { slug: 'software-developer', label: 'Software Developer' },
     { slug: 'backend-developer', label: 'Backend Developer' },
+    { slug: 'backend-engineer', label: 'Backend Engineer' },
     { slug: 'full-stack-developer', label: 'Full Stack Developer' },
     { slug: 'node-js-developer', label: 'Node.js Developer' },
     { slug: 'golang-developer', label: 'Go Developer' },
+    { slug: 'platform-engineer', label: 'Platform Engineer' },
+    { slug: 'frontend-developer', label: 'Frontend Developer' },
+    { slug: 'react-developer', label: 'React Developer' },
+    { slug: 'python-developer', label: 'Python Developer' },
+    { slug: 'devops-engineer', label: 'DevOps Engineer' },
   ],
   roleKeywords: [
     'software engineer',
