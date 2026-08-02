@@ -198,66 +198,62 @@ async function fillInput(page, selectors, value) {
 }
 
 // Login to Naukri — requires NAUKRI_EMAIL + NAUKRI_PASSWORD
+// Returns true once we're on a logged-in Naukri page. Evaluate can throw mid-
+// navigation ("execution context destroyed") — that itself means a redirect is
+// happening (usually the successful login redirect), so callers treat a throw as
+// "not yet confirmed" rather than a failure.
+async function naukriLoggedIn(page) {
+  const url = page.url();
+  if (/\/mnjuser|\/homepage/.test(url)) return true;
+  if (/\/nlogin\/login|\/login/.test(url)) return false;
+  return page.evaluate(() =>
+    /logout|my naukri|view profile|mnjuser/i.test(document.body.innerText || '')
+  ).catch(() => true); // evaluate failed mid-nav → a redirect is in flight, assume success
+}
+
 export async function naukriLogin(page, email, password) {
   await prepareNaukriPage(page);
   await page.goto('https://www.naukri.com/nlogin/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
   await new Promise(r => setTimeout(r, 2500));
 
-  // Dismiss any overlay/cookie banner that might block clicks
+  // Already authenticated? Naukri redirects the login URL away when a session
+  // exists — treat that as success instead of hunting for a form that isn't there.
+  if (await naukriLoggedIn(page)) return;
+
   await page.evaluate(() => {
     document.querySelectorAll('[class*="cookie"], [class*="overlay"], [class*="modal"], [class*="popup"]').forEach(el => {
-      if ((el.textContent || '').toLowerCase().includes('accept') || (el.textContent || '').toLowerCase().includes('cookie')) {
-        el.remove();
-      }
+      const t = (el.textContent || '').toLowerCase();
+      if (t.includes('accept') || t.includes('cookie')) el.remove();
     });
-  });
+  }).catch(() => {});
 
   const emailFilled = await fillInput(page,
-    ['#usernameField', 'input[type="email"]', 'input[placeholder*="email" i]', 'input[name*="email" i]'],
-    email
-  );
+    ['#usernameField', 'input[type="email"]', 'input[placeholder*="email" i]', 'input[name*="email" i]'], email);
   if (!emailFilled) throw new Error('Naukri login: email field not found on page');
-
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, 400));
 
   const passFilled = await fillInput(page,
-    ['#passwordField', 'input[type="password"]', 'input[name*="password" i]'],
-    password
-  );
+    ['#passwordField', 'input[type="password"]', 'input[name*="password" i]'], password);
   if (!passFilled) throw new Error('Naukri login: password field not found on page');
+  await new Promise(r => setTimeout(r, 400));
 
-  await new Promise(r => setTimeout(r, 500));
-
-  // Submit — try button click by text/type, then form.submit(), then keyboard Enter
+  // Submit ONCE. The old code also pressed Enter, which double-submitted and fired
+  // the navigation while a later evaluate() was still running → "execution context
+  // destroyed" (mis-reported as a login failure even though login had succeeded).
   await page.evaluate(() => {
-    // Try type=submit or class-based selectors first
-    const byType = document.querySelector('button[type="submit"], input[type="submit"], .loginButton, button.btn-primary');
-    if (byType) { byType.click(); return; }
-    // Try finding any button whose text is "Login" or "Sign in"
-    const allBtns = Array.from(document.querySelectorAll('button, a[class*="login"]'));
-    const byText = allBtns.find(b => /^(login|sign in)$/i.test((b.textContent || '').trim()));
-    if (byText) { byText.click(); return; }
-    // Last resort: submit the form
+    const btn = document.querySelector('button[type="submit"], input[type="submit"], .loginButton, button.btn-primary');
+    if (btn) { btn.click(); return; }
     const form = document.querySelector('form');
     if (form) form.submit();
-  });
+  }).catch(() => {});
 
-  // Also press Enter on the password field as a reliable fallback
-  await page.keyboard.press('Enter').catch(() => {});
-
-  // Wait for login to process — watch for the login form to disappear (up to 10s)
-  let loginFormGone = false;
-  for (let i = 0; i < 20; i++) {
+  // Confirm by polling page.url() — this runs in Node, not the page, so it never
+  // throws during the post-submit navigation. Success = we've left the login page.
+  for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 500));
-    const hasForm = await page.evaluate(() =>
-      !!(document.querySelector('#usernameField') || document.querySelector('#passwordField'))
-    );
-    if (!hasForm) { loginFormGone = true; break; }
+    if (await naukriLoggedIn(page)) return;
   }
-
-  if (!loginFormGone) {
-    throw new Error('Naukri login failed — login form still visible after submit. Check credentials or solve CAPTCHA in the browser window.');
-  }
+  throw new Error('Naukri login failed — still on the login page after submit. Check credentials or a CAPTCHA.');
 }
 
 // Fill application form fields — handles React controlled inputs
