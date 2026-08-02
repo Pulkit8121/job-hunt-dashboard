@@ -15,20 +15,28 @@ import { isExcludedOutreachDomain } from '@/lib/exclusions';
 const MIN_DELAY_MS = 10000;
 const MAX_DELAY_MS = 25000;
 
-// Hard ceiling on real outreach emails sent per day, regardless of
-// OUTREACH_DAILY_CAP env config — a personal Gmail account risks spam/abuse
-// flags well before Google's raw ~500/day technical limit, especially once
-// recipients include random personal addresses (HN "who's hiring" contacts)
-// rather than only verified company domains. Deliberately not configurable
-// via env var so a stale/high value on the server can't silently reintroduce
-// the risk this was added to prevent.
-const HARD_MAX_DAILY_SENDS = 150;
+// Absolute ceiling on real outreach emails sent per day, regardless of a higher
+// OUTREACH_DAILY_CAP — a personal Gmail account's hard technical limit is ~500
+// recipients/day, and crossing it gets sends blocked. We stay meaningfully below
+// that so a spike (retries, a manual run on top of the cron) can't tip over.
+// Not env-configurable so a stale/huge value on the server can't silently blow
+// past Gmail's limit and freeze the account.
+const HARD_MAX_DAILY_SENDS = 400;
 
 function isToday(date) {
   if (!date) return false;
   const d = new Date(date);
   const now = new Date();
   return d.toDateString() === now.toDateString();
+}
+
+// Emails go out in one bulk burst → spam filters. Spreading the day's remaining
+// quota evenly across the hours left (the send cron fires hourly, 24/7) keeps
+// each batch small so Gmail sees a steady human-like trickle, not a blast. Uses
+// hours-until-midnight so the day's allotment is paced to finish by ~midnight.
+function perRunSpread(remainingToday) {
+  const hoursLeftToday = Math.max(1, 24 - new Date().getHours());
+  return Math.max(1, Math.ceil(remainingToday / hoursLeftToday));
 }
 
 export async function POST(request) {
@@ -52,15 +60,20 @@ export async function POST(request) {
 
   (async () => {
     try {
-      const dailyCap = Math.min(Number(process.env.OUTREACH_DAILY_CAP) || 400, HARD_MAX_DAILY_SENDS);
+      const dailyCap = Math.min(Number(process.env.OUTREACH_DAILY_CAP) || 300, HARD_MAX_DAILY_SENDS);
       const all = await readOutreachContacts();
       const sentToday = all.filter(c => c.status === 'sent' && isToday(c.sentAt)).length;
       const remainingToday = Math.max(0, dailyCap - sentToday);
       const pending = all.filter(c => c.status === 'pending');
 
-      const cap = Math.min(pending.length, remainingToday, limit || Infinity);
+      // Trickle: bound every run to an even slice of what's left for the day so
+      // the hourly cron paces the whole daily quota out instead of bursting it —
+      // the spread always applies (even when the cron passes a big `limit`),
+      // because the burst is exactly what triggers spam filters.
+      const spread = perRunSpread(remainingToday);
+      const cap = Math.min(pending.length, remainingToday, limit || Infinity, spread);
 
-      await send(`ℹ ${pending.length} pending contact(s). ${sentToday}/${dailyCap} already sent today. Sending up to ${cap} this run.`);
+      await send(`ℹ ${pending.length} pending · ${sentToday}/${dailyCap} sent today · trickling ~${spread}/hr → sending up to ${cap} this run.`);
 
       if (cap <= 0) {
         await send(sentToday >= dailyCap
