@@ -60,7 +60,7 @@ export async function POST(request) {
 
   (async () => {
     try {
-      const dailyCap = Math.min(Number(process.env.OUTREACH_DAILY_CAP) || 300, HARD_MAX_DAILY_SENDS);
+      const dailyCap = Math.min(Number(process.env.OUTREACH_DAILY_CAP) || 200, HARD_MAX_DAILY_SENDS);
       const all = await readOutreachContacts();
       const sentToday = all.filter(c => c.status === 'sent' && isToday(c.sentAt)).length;
       const remainingToday = Math.max(0, dailyCap - sentToday);
