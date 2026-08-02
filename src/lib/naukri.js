@@ -845,6 +845,7 @@ export async function naukriEasyApply(page, job, signal, ctx) {
     // Wrapped in withTabCleanup: some Apply buttons ignore the window.open override
     // (e.g. real target="_blank" anchors added after the page loaded) and still
     // spawn a stray tab — close it immediately rather than let it accumulate.
+    const urlBeforeClick = page.url();
     const clicked = await withTabCleanup(page, () => page.evaluate(() => {
       // Primary: find by exact text 'Apply' or 'Easy Apply' (XPath-style text match)
       const allEls = Array.from(document.querySelectorAll('button, a, [class*="applyBtn"], [class*="apply-btn"]'));
@@ -896,11 +897,23 @@ export async function naukriEasyApply(page, job, signal, ctx) {
     }
 
     if (!sawChatbot) {
-      // No chatbot and no explicit success signal — re-check once more, then treat
-      // as applied (Naukri often confirms via a toast that's already gone).
       const s = await detectState();
       if (s.instantApplied) return { success: true, reason: 'Applied (instant)' };
-      return { success: true, reason: 'Submitted (verify on Naukri profile)' };
+      // No chatbot AND no explicit success signal. Previously this silently
+      // assumed success — confirmed by direct re-visit that the Apply button was
+      // still showing, i.e. the click had no real effect (page not settled yet,
+      // an overlay/dialog blocked it, etc.). Only claim success if the click
+      // demonstrably changed something (URL moved, or the Apply button is gone /
+      // replaced by an applied-state indicator); otherwise report a distinct,
+      // retryable failure instead of a false positive.
+      const effectSeen = await page.evaluate((before) => {
+        if (location.href !== before) return true;
+        const stillHasApply = Array.from(document.querySelectorAll('button, a'))
+          .some(el => /^(apply|easy apply)$/i.test((el.textContent || '').trim()));
+        return !stillHasApply;
+      }, urlBeforeClick).catch(() => false);
+      if (effectSeen) return { success: true, reason: 'Submitted (verify on Naukri profile)' };
+      return { success: false, reason: 'Apply click had no visible effect — retrying next run' };
     }
 
     // ── Chatbot conversation loop (up to 25 turns) ───────────────────────────────
