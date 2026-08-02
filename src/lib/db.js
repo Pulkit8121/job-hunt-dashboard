@@ -521,6 +521,18 @@ export async function addOutreachContact(contact) {
   }
 }
 
+// Escapes regex metacharacters (., +, *, ?, etc.) in a string so it can be used
+// as a literal match inside a RegExp. Without this, "+"-tagged addresses (e.g.
+// Gmail-style "name+tag@x.com", common on HN "who's hiring" contacts) silently
+// fail to match `new RegExp('^'+email+'$')` — the "+" is read as a quantifier,
+// not a literal character — so findOneAndUpdate matches zero documents and the
+// status='sent' write never persists. The contact stays 'pending' forever and
+// gets re-sent to on every subsequent cron run (confirmed: some addresses were
+// re-sent 78+ times before this fix).
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export async function updateOutreachContact(email, update) {
   if (!useMongo) {
     const all = jsonReadOutreach();
@@ -530,7 +542,7 @@ export async function updateOutreachContact(email, update) {
     return;
   }
   await connectDB();
-  return OutreachContact.findOneAndUpdate({ email: new RegExp(`^${email}$`, 'i') }, { $set: update });
+  return OutreachContact.findOneAndUpdate({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') }, { $set: update });
 }
 
 export async function deleteOutreachContact(email) {
@@ -540,7 +552,7 @@ export async function deleteOutreachContact(email) {
     return;
   }
   await connectDB();
-  return OutreachContact.deleteOne({ email: new RegExp(`^${email}$`, 'i') });
+  return OutreachContact.deleteOne({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') });
 }
 
 // ── Screening-question answer cache ───────────────────────────────────────────
