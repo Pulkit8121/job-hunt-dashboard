@@ -406,7 +406,73 @@ async function readChatbotTurn(page) {
 // Applies a decided answer. `optionIndex >= 0` clicks that chip; otherwise the
 // text is typed into the chat box and sent.
 async function applyChatbotAnswer(page, { optionIndex, text }) {
-  return page.evaluate((optIdx, val) => {
+  if (optionIndex >= 0) {
+    return page.evaluate((optIdx) => {
+      function isVisible(el) {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetParent !== null;
+      }
+      const containers = Array.from(document.querySelectorAll('.ssrc__radio-btn-container')).filter(isVisible);
+      const picked = containers[optIdx];
+      if (!picked) return 'option_missing';
+      const radioInput = picked.querySelector('input');
+      if (radioInput) radioInput.click(); else picked.click();
+      return 'option_clicked';
+    }, optionIndex);
+  }
+
+  if (text == null || text === '') return 'no_text';
+
+  // div.textArea is a *contenteditable* element, not a wrapper around a real
+  // <input>/<textarea> — confirmed via live DOM inspection:
+  //   <div class="textArea" contenteditable="true" id="userInput__X">
+  // Synthetic events (textContent= + dispatchEvent('input')) don't reliably
+  // update the framework's internal draft-message state, and the visible send
+  // icon (id="add-icon__X", sibling of the textArea) starts hidden behind a
+  // "d-none" class that only lifts once the framework sees real input — so the
+  // old code silently never submitted anything; the same question repeated
+  // forever (confirmed: 25 identical turns sending "2" to the same question).
+  // Puppeteer's real keyboard events are trusted/native, so the framework's
+  // onChange/onInput handlers fire exactly as they would for a human typing.
+  const editableId = await page.evaluate(() => {
+    const el = document.querySelector('div.textArea');
+    if (!el) return null;
+    el.focus();
+    el.textContent = ''; // clear any stale content from a previous failed attempt
+    return el.id || true;
+  });
+
+  if (editableId) {
+    await page.keyboard.type(String(text), { delay: 25 });
+    await new Promise(r => setTimeout(r, 400));
+
+    const clicked = await page.evaluate(() => {
+      function isVisible(el) {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetParent !== null;
+      }
+      const textArea = document.querySelector('div.textArea');
+      // The send icon's id mirrors the textArea's id: userInput__X -> add-icon__X
+      const suffix = (textArea?.id || '').replace(/^userInput__/, '');
+      const addIcon = suffix ? document.getElementById(`add-icon__${suffix}`) : null;
+      // Programmatic .click() fires the bound handler even while a CSS class
+      // (e.g. "d-none") hides the icon, so try it regardless of visibility.
+      if (addIcon) { addIcon.click(); return 'icon'; }
+      const sendBtn =
+        document.querySelector('[class*="sendBtn"], [class*="send-btn"], [class*="chatSend"]') ||
+        Array.from(document.querySelectorAll('button')).find(b => isVisible(b) && /send|submit/i.test(b.textContent || ''));
+      if (sendBtn) { sendBtn.click(); return 'button'; }
+      return null;
+    });
+
+    if (!clicked) await page.keyboard.press('Enter');
+    return 'text_sent';
+  }
+
+  // Fallback for older/alternate layouts using a real <input> element.
+  const sentViaInput = await page.evaluate((val) => {
     function isVisible(el) {
       if (!el) return false;
       const s = window.getComputedStyle(el);
@@ -418,37 +484,6 @@ async function applyChatbotAnswer(page, { optionIndex, text }) {
       el.dispatchEvent(new Event('input',  { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
-
-    if (optIdx >= 0) {
-      const containers = Array.from(document.querySelectorAll('.ssrc__radio-btn-container')).filter(isVisible);
-      const picked = containers[optIdx];
-      if (!picked) return 'option_missing';
-      const radioInput = picked.querySelector('input');
-      if (radioInput) radioInput.click(); else picked.click();
-      return 'option_clicked';
-    }
-
-    if (val == null || val === '') return 'no_text';
-
-    const textArea = document.querySelector('div.textArea');
-    if (textArea && isVisible(textArea)) {
-      const inner = textArea.querySelector('input, textarea');
-      if (inner) setReactInput(inner, val);
-      else {
-        textArea.textContent = val;
-        textArea.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      const sendBtn =
-        document.querySelector('[class*="sendBtn"], [class*="send-btn"], [class*="chatSend"]') ||
-        Array.from(document.querySelectorAll('button')).find(b => /send|submit/i.test(b.textContent));
-      if (sendBtn && isVisible(sendBtn)) sendBtn.click();
-      else if (inner) {
-        inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-        inner.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
-      }
-      return 'text_sent';
-    }
-
     const fallbackSelectors = [
       '[class*="chatInput"] input', '[class*="chat-input"] input',
       '[class*="ssInput"] input', 'input[placeholder*="type" i]',
@@ -461,10 +496,12 @@ async function applyChatbotAnswer(page, { optionIndex, text }) {
       const sendBtn = document.querySelector('[class*="send"], [class*="chatSend"]');
       if (sendBtn && isVisible(sendBtn)) sendBtn.click();
       else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-      return 'text_sent';
+      return true;
     }
-    return 'no_input';
-  }, optionIndex ?? -1, text ?? null);
+    return false;
+  }, text);
+
+  return sentViaInput ? 'text_sent' : 'no_input';
 }
 
 // Clicks the final submit/confirm button if one is showing.
