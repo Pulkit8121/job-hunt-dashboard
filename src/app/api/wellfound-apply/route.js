@@ -12,6 +12,7 @@ import {
   WF_SEARCH_PHASES,
   WF_PROFILE,
 } from '@/lib/wellfound';
+import { startRun, finishRun, isRunning } from '@/lib/wellfoundRunState';
 
 export async function POST(request) {
   const { phase: requestedPhase } = await request.json().catch(() => ({}));
@@ -20,6 +21,15 @@ export async function POST(request) {
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
   const send    = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`)).catch(() => {});
+
+  if (isRunning()) {
+    await send('⚠ A Wellfound apply run is already in progress. Skipping this trigger.');
+    await writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+    });
+  }
+  startRun();
 
   (async () => {
     let browser;
@@ -194,6 +204,7 @@ export async function POST(request) {
       await send(`FATAL: ${e.message}`);
     } finally {
       if (browser && !connected) await browser.close().catch(() => {});
+      finishRun();
       await writer.close().catch(() => {});
     }
   })();
