@@ -214,11 +214,22 @@ async function naukriLoggedIn(page) {
 export async function naukriLogin(page, email, password) {
   await prepareNaukriPage(page);
   await page.goto('https://www.naukri.com/nlogin/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
-  await new Promise(r => setTimeout(r, 2500));
 
   // Already authenticated? Naukri redirects the login URL away when a session
   // exists — treat that as success instead of hunting for a form that isn't there.
   if (await naukriLoggedIn(page)) return;
+
+  // The login form hydrates client-side after the initial HTML — a fixed 2.5s
+  // wait was flaky under any load (confirmed: with networkidle2 + polling the
+  // field reliably appears by ~2-4s, but a bare timer occasionally fired before
+  // hydration finished and threw "email field not found" on a perfectly normal
+  // page). Poll for the field instead of guessing a fixed delay.
+  let formReady = false;
+  for (let i = 0; i < 16; i++) {
+    if (await page.$('#usernameField, input[type="email"]')) { formReady = true; break; }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (!formReady) throw new Error('Naukri login: login form never rendered (page may be slow or blocked)');
 
   await page.evaluate(() => {
     document.querySelectorAll('[class*="cookie"], [class*="overlay"], [class*="modal"], [class*="popup"]').forEach(el => {
