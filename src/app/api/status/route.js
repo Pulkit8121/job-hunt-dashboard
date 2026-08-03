@@ -34,8 +34,11 @@ function readLastRun(logFile) {
     return { lastStartedAt: null, lastMessage: null, lastResult: null };
   }
 
-  // Only look at the tail — these logs can be large.
-  const tail = raw.slice(-40000);
+  // Only look at the tail — these logs can grow to tens of MB (naukri-pipeline.log
+  // hit 22MB from verbose per-job "no matching jobs found" lines), so read a
+  // generous slice rather than the last few KB, which wouldn't even reach the
+  // most recent run's start marker.
+  const tail = raw.slice(-1500000);
   const lines = tail.split('\n');
 
   let lastStartedAt = null;
