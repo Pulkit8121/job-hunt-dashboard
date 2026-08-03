@@ -43,7 +43,10 @@ function readLastRun(logFile) {
   let lastResult = null; // 'success' | 'fatal' | 'stopped' | null
 
   for (const line of lines) {
-    const startMatch = line.match(/^=== (.+?) .+ (?:start|begin) ===/i);
+    // Format: "=== Mon Aug  3 06:30:01 UTC 2026 company-portal start ===" — match
+    // the `date -u` shape directly rather than splitting on the trailing label,
+    // since the label itself can contain spaces (e.g. "naukri pipeline").
+    const startMatch = line.match(/^=== (\w+ \w+\s+\d+ [\d:]+ UTC \d{4})\b.*\bstart ===/i);
     if (startMatch) lastStartedAt = startMatch[1];
 
     if (!line.trim().startsWith('data:')) continue;
