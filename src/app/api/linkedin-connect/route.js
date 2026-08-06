@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { readPeople, markPersonConnected } from '@/lib/db';
 import { linkedInLogin, sendConnectionRequest } from '@/lib/linkedin-scraper';
-import { getBrowser } from '@/lib/browser';
+import { getBrowser, closeBrowserSafely } from '@/lib/browser';
 import { startRun, finishRun, isRunning } from '@/lib/linkedinRunState';
 
 export async function POST(request) {
@@ -92,7 +92,7 @@ export async function POST(request) {
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
-      if (browser && !connected) await browser.close().catch(() => {});
+      await closeBrowserSafely(browser, connected);
       finishRun();
       await writer.close().catch(() => {});
     }

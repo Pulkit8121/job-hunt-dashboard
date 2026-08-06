@@ -6,7 +6,7 @@ import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { discoverAtsJobs, detectAtsFromUrl } from '@/lib/company-portal-discovery';
 import { filterGlobalEligibleJobs } from '@/lib/matcher';
 import { applyToPortalJob } from '@/lib/generic-form-apply';
-import { getBrowser } from '@/lib/browser';
+import { getBrowser, closeBrowserSafely } from '@/lib/browser';
 import { startRun, finishRun, isRunning } from '@/lib/companyPortalRunState';
 
 // Workday isn't here — discovery works (public CXS job-listing API), but
@@ -148,7 +148,7 @@ export async function POST() {
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
-      if (browser && !connected) await browser.close().catch(() => {});
+      await closeBrowserSafely(browser, connected);
       finishRun();
       await writer.close().catch(() => {});
     }

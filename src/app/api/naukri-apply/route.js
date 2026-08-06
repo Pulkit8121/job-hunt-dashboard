@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks, readAnswerCache, saveAnswer } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
-import { getBrowser, getReusablePage } from '@/lib/browser';
+import { getBrowser, getReusablePage, closeBrowserSafely } from '@/lib/browser';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { startRun, finishRun, isRunning } from '@/lib/naukriRunState';
 
@@ -212,7 +212,7 @@ export async function POST(request) {
       await send(`FATAL: ${e.message}`);
     } finally {
       // Only close a browser we launched ourselves — never kill user's existing Chrome
-      if (browser && !connected) await browser.close().catch(() => {});
+      await closeBrowserSafely(browser, connected);
       finishRun();
       await writer.close().catch(() => {});
     }

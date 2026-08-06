@@ -1,7 +1,7 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { getBrowser, getReusablePage } from '@/lib/browser';
+import { getBrowser, getReusablePage, closeBrowserSafely } from '@/lib/browser';
 import { recordApplied } from '@/lib/db';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import {
@@ -203,7 +203,7 @@ export async function POST(request) {
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
-      if (browser && !connected) await browser.close().catch(() => {});
+      await closeBrowserSafely(browser, connected);
       finishRun();
       await writer.close().catch(() => {});
     }
