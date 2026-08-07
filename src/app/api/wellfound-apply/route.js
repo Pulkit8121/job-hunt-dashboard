@@ -14,6 +14,51 @@ import {
 } from '@/lib/wellfound';
 import { startRun, finishRun, isRunning } from '@/lib/wellfoundRunState';
 
+async function detectWellfoundSession(page) {
+  const checks = [
+    'https://wellfound.com',
+    'https://wellfound.com/jobs',
+    'https://wellfound.com/me/profile',
+  ];
+
+  for (const url of checks) {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+    const state = await page.evaluate(() => {
+      const title = document.title || '';
+      const bodyText = (document.body?.innerText || '').slice(0, 400).toLowerCase();
+      const onChallenge = /just a moment|attention required|verify you are human|checking your browser/i.test(
+        `${title} ${bodyText}`
+      );
+
+      const loggedInSignals = [
+        !!document.querySelector('[class*="avatar"], [class*="profile-menu"], [data-test*="user"]'),
+        !!document.querySelector('a[href="/jobs"]'),
+        !!document.querySelector('a[href="/me/profile"]'),
+        !!document.querySelector('a[href="/messages"]'),
+      ];
+
+      const loginLink = !!document.querySelector('a[href="/login"], a[href="/users/sign_in"]');
+      const cookieSignals = document.cookie
+        .split(';')
+        .map(v => v.trim().toLowerCase())
+        .filter(Boolean)
+        .some(v => v.startsWith('_wellfound_session=') || v.startsWith('remember_user_token='));
+
+      return {
+        checkedUrl: location.href,
+        title,
+        onChallenge,
+        loggedIn: loggedInSignals.some(Boolean) || (cookieSignals && !loginLink),
+      };
+    });
+
+    if (state.onChallenge) return state;
+    if (state.loggedIn) return state;
+  }
+
+  return { checkedUrl: checks[checks.length - 1], title: '', onChallenge: false, loggedIn: false };
+}
+
 export async function POST(request) {
   const { phase: requestedPhase } = await request.json().catch(() => ({}));
 
@@ -73,12 +118,7 @@ export async function POST(request) {
 
       // Verify we're actually logged in (you sign in manually via noVNC on the
       // server; locally the bot can log in itself since your home IP isn't blocked).
-      await workPage.goto('https://wellfound.com', { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-      const loginState = await workPage.evaluate(() => {
-        const onChallenge = /just a moment|attention required|verify you are human/i.test(document.title + ' ' + (document.body?.innerText || '').slice(0, 200));
-        const loggedIn = !document.querySelector('a[href="/login"]') || !!document.querySelector('[class*="avatar"], [class*="profile-menu"], [data-test*="user"]');
-        return { onChallenge, loggedIn };
-      });
+      const loginState = await detectWellfoundSession(workPage);
 
       if (loginState.onChallenge) {
         await send('⚠ Cloudflare challenge is showing in the server browser.');
@@ -90,6 +130,7 @@ export async function POST(request) {
 
       if (loginState.loggedIn) {
         await send(`✓ Using logged-in Wellfound session${connected ? ` (attached to ${reusedExisting ? reason.replace('-', ' ') : 'the VNC browser'})` : ''}.`);
+        await send(`ℹ Session verified on ${loginState.checkedUrl}`);
       } else if (onServer) {
         await send('⚠ Not logged into Wellfound in the server browser.');
         await send('▶ Open http://187.127.188.153:6080/vnc.html, sign in, then click Apply again.');
