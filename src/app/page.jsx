@@ -183,8 +183,13 @@ export default function Dashboard() {
   const busy = scanBusy || easyApplying || wfApplying;
 
   // ── Applied jobs grouped by company ──────────────────────────────────────────
+  // The "Applied Jobs" tab only covers Naukri + Wellfound — company-portal
+  // applies already have their own dedicated "Company Portals" tab, and mixing
+  // them in here double-counted the same data under a "Total Applied" number
+  // that read as if every one of those was a confirmed, verified application.
+  const directApplied = applied.filter(a => a.source === 'naukri' || a.source === 'wellfound');
   const appliedByCompany = Object.create(null); // see jobsByCompany comment above
-  for (const a of applied) {
+  for (const a of directApplied) {
     if (!appliedByCompany[a.companyId]) appliedByCompany[a.companyId] = { name: a.companyName, jobs: [] };
     appliedByCompany[a.companyId].jobs.push(a);
   }
@@ -209,7 +214,7 @@ export default function Dashboard() {
               <span className="px-2 py-1 rounded-full bg-blue-900/40 text-blue-300">{scannedCount} scanned</span>
               {totalJobs > 0 && <span className="px-2 py-1 rounded-full bg-emerald-900/40 text-emerald-300">{highMatch} high match</span>}
               {peopleCount > 0 && <span className="px-2 py-1 rounded-full bg-sky-900/40 text-sky-300">{peopleCount} contacts</span>}
-              {applied.length > 0 && <span className="px-2 py-1 rounded-full bg-fuchsia-900/40 text-fuchsia-300">{applied.length} applied</span>}
+              {directApplied.length > 0 && <span className="px-2 py-1 rounded-full bg-fuchsia-900/40 text-fuchsia-300">{directApplied.length} applied</span>}
               {scanning    && <span className="px-2 py-1 rounded-full bg-yellow-900/40 text-yellow-300 flex items-center gap-1"><RefreshCw size={10} className="animate-spin" /> scanning...</span>}
               {agentScanning && <span className="px-2 py-1 rounded-full bg-fuchsia-900/40 text-fuchsia-300 flex items-center gap-1"><Bot size={10} className="animate-pulse" /> agent scanning...</span>}
               {discovering && <span className="px-2 py-1 rounded-full bg-yellow-900/40 text-yellow-300 flex items-center gap-1"><Zap size={10} className="animate-pulse" /> auto adding...</span>}
@@ -327,8 +332,8 @@ export default function Dashboard() {
                   : 'text-[#8b949e] hover:text-[#e6edf3]'
               }`}>
               {tab.label}
-              {tab.id === 'applied' && applied.length > 0 && (
-                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-fuchsia-900/50 text-fuchsia-200">{applied.length}</span>
+              {tab.id === 'applied' && directApplied.length > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-fuchsia-900/50 text-fuchsia-200">{directApplied.length}</span>
               )}
             </button>
           ))}
@@ -424,7 +429,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {applied.length === 0 ? (
+          {directApplied.length === 0 ? (
             <div className="text-center py-16 text-[#8b949e]">
               <CheckCircle2 size={40} className="mx-auto mb-4 opacity-20" />
               <p className="text-sm">No applications recorded yet.</p>
@@ -433,7 +438,7 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-4">
               <div className="flex items-center gap-4 mb-4">
-                <Stat label="Total Applied"  value={applied.length} color="text-fuchsia-300" />
+                <Stat label="Total Applied"  value={directApplied.length} color="text-fuchsia-300" />
                 <Stat label="Companies"      value={Object.keys(appliedByCompany).length} color="text-blue-300" />
               </div>
               {Object.entries(appliedByCompany).map(([cid, { name, jobs: cjobs }]) => (
@@ -600,7 +605,7 @@ export default function Dashboard() {
                   <Stat label="Profile Fit" value={visibleJobCount}  color="text-emerald-300" />
                   <Stat label="Jobs Found"  value={totalJobs}        color="text-emerald-400" />
                   <Stat label="LI Contacts" value={peopleCount}      color="text-sky-300" />
-                  <Stat label="Applied"     value={applied.length}   color="text-fuchsia-300" />
+                  <Stat label="Applied"     value={directApplied.length} color="text-fuchsia-300" />
                 </div>
                 <p className="text-xs text-[#8b949e]">
                   <strong className="text-emerald-400">Refresh All</strong> → scan ·{' '}

@@ -23,9 +23,10 @@ export async function getBrowser({ headless = false, requireConnected = false, p
             puppeteer.connect({
               browserWSEndpoint: webSocketDebuggerUrl,
               defaultViewport: null, // use Chrome's own viewport
+              protocolTimeout: 120000,
             }),
             new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('puppeteer.connect timed out — existing Chrome is unresponsive')), 5000)
+              setTimeout(() => reject(new Error('puppeteer.connect timed out — existing Chrome is unresponsive')), 25000)
             ),
           ]);
           return { browser, connected: true };

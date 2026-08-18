@@ -53,15 +53,17 @@ async function mapWithConcurrency(items, limit, fn) {
 // knownIds: Set of already-scanned Message-ID strings, to skip re-classifying
 // mail we've already stored. onProgress(msg) called for log lines.
 // Returns array of { messageId, from, subject, snippet, category, receivedAt }.
-export async function scanInboxForJobMail({ sinceDays = 30, knownIds = new Set(), onProgress = () => {} } = {}) {
+export async function scanInboxForJobMail({ sinceDays = 30, knownIds = new Set(), onProgress = () => {}, identity } = {}) {
   const { ImapFlow } = await import('imapflow');
   const { simpleParser } = await import('mailparser');
+  const { getIdentity } = await import('./identities.js');
+  const id = identity || getIdentity('primary');
 
   const client = new ImapFlow({
     host: 'imap.gmail.com',
     port: 993,
     secure: true,
-    auth: { user: process.env.SMTP_EMAIL, pass: process.env.SMTP_APP_PASSWORD },
+    auth: { user: id.email, pass: id.appPassword },
     logger: false,
   });
 
@@ -126,6 +128,7 @@ export async function scanInboxForJobMail({ sinceDays = 30, knownIds = new Set()
       snippet: snippet.slice(0, 400),
       category,
       receivedAt: parsed.date || new Date(),
+      mailbox: id.email,
     };
   });
 

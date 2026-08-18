@@ -55,6 +55,19 @@ async function callGemini(prompt, { temperature }) {
 
 const PROVIDERS = { openai: callOpenAI, gemini: callGemini };
 
+// Both SDKs' own default timeouts run into minutes — fine for a standalone
+// script, but fatal here: one slow open-ended question stalls the entire
+// sequential apply pipeline (one browser tab, one job at a time) for the rest
+// of the run. Bound every call hard so a slow provider degrades to the next
+// provider (or the deterministic fallback) instead of hanging the run.
+const CALL_TIMEOUT_MS = 20000;
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`LLM call timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
 // Returns the model's text, or null when no provider could answer.
 // Never throws — callers treat null as "fall back to deterministic logic".
 export async function completeText(prompt, { temperature = 0, maxTokens } = {}) {
@@ -62,7 +75,7 @@ export async function completeText(prompt, { temperature = 0, maxTokens } = {}) 
     const fn = PROVIDERS[name];
     if (!fn || dead.has(name)) continue;
     try {
-      const text = await fn(prompt, { temperature, maxTokens });
+      const text = await withTimeout(fn(prompt, { temperature, maxTokens }), CALL_TIMEOUT_MS);
       if (text) return text;
     } catch (e) {
       if (isTerminal(e)) {

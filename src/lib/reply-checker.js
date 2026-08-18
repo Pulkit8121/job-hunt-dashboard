@@ -2,31 +2,56 @@
 // contacts we've emailed, and classifies each with AI.
 import { completeText } from './llm.js';
 
-async function classifyReply(snippet) {
-  const prompt = `Classify this email reply to a job outreach email. Reply with ONLY one word: "interested" if they want to talk/interview/schedule a call, "rejected" if they're declining or saying no openings, "auto-reply" if it's an out-of-office/automated bounce/acknowledgement, or "other" for anything else.
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
-Email:
+// One LLM call per reply, extracting three things at once (status + two
+// action triggers) instead of three separate calls. A strict line-based
+// format rather than JSON — small, cheap models follow "LABEL: value" far
+// more reliably than balanced-brace JSON, and parsing is a single regex per
+// line with a safe default if the model ever deviates.
+async function classifyReplyDetails(snippet, originalEmail) {
+  const prompt = `You are triaging a reply to a cold job-outreach email. Read it and answer in EXACTLY this 3-line format, nothing else:
+STATUS: <interested, rejected, auto-reply, or other>
+ALT_EMAIL: <a different email address they explicitly asked us to use instead, or "none">
+LOCATION_OBJECTION: <"yes" only if they're declining/qualifying because the role/team is based somewhere the candidate isn't (e.g. "we only hire locally in Belgium/Europe"), else "no">
+
+STATUS meanings: "interested" = wants to talk/interview/schedule a call. "rejected" = declining or no openings. "auto-reply" = out-of-office/automated bounce/acknowledgement. "other" = anything else.
+
+Reply:
 """
-${snippet.slice(0, 1000)}
+${snippet.slice(0, 1200)}
 """`;
 
   const raw = await completeText(prompt);
-  const word = (raw || '').trim().toLowerCase().replace(/[^a-z-]/g, '');
-  if (['interested', 'rejected', 'auto-reply', 'other'].includes(word)) return word;
-  return 'other';
+  const status = (raw?.match(/STATUS:\s*([a-z-]+)/i)?.[1] || '').toLowerCase();
+  const replyStatus = ['interested', 'rejected', 'auto-reply', 'other'].includes(status) ? status : 'other';
+
+  let altEmail = raw?.match(/ALT_EMAIL:\s*(\S+)/i)?.[1]?.toLowerCase().replace(/[,.;]$/, '');
+  if (!altEmail || altEmail === 'none' || !EMAIL_RE.test(altEmail) || altEmail === originalEmail?.toLowerCase()) {
+    altEmail = null;
+  }
+
+  const locationObjection = (raw?.match(/LOCATION_OBJECTION:\s*(yes|no)/i)?.[1] || '').toLowerCase() === 'yes';
+
+  return { replyStatus, altEmail, locationObjection };
 }
 
-// contacts: array of { email, sentAt } for contacts already marked 'sent' with no reply recorded yet.
-// onProgress(msg) called for log lines. Returns array of { email, replyStatus, replySnippet, repliedAt }.
-export async function checkReplies(contacts, onProgress = () => {}) {
+// contacts: array of { email, sentAt } for contacts already marked 'sent' with no reply recorded yet —
+// must all have been sent from the SAME identity as `identity`, since a reply
+// to a message sent from pa.devworks@gmail.com lands in that inbox, not
+// pulkitagarwal2020's. onProgress(msg) called for log lines.
+// Returns array of { email, replyStatus, replySnippet, repliedAt }.
+export async function checkReplies(contacts, onProgress = () => {}, identity) {
   const { ImapFlow } = await import('imapflow');
   const { simpleParser } = await import('mailparser');
+  const { getIdentity } = await import('./identities.js');
+  const id = identity || getIdentity('primary');
 
   const client = new ImapFlow({
     host: 'imap.gmail.com',
     port: 993,
     secure: true,
-    auth: { user: process.env.SMTP_EMAIL, pass: process.env.SMTP_APP_PASSWORD },
+    auth: { user: id.email, pass: id.appPassword },
     logger: false,
   });
 
@@ -47,15 +72,22 @@ export async function checkReplies(contacts, onProgress = () => {}) {
 
         const parsed = await simpleParser(message.source);
         const snippet = (parsed.text || parsed.html || '').slice(0, 2000);
-        const replyStatus = await classifyReply(snippet);
+        const { replyStatus, altEmail, locationObjection } = await classifyReplyDetails(snippet, contact.email);
 
         results.push({
           email: contact.email,
           replyStatus,
           replySnippet: snippet.slice(0, 300),
           repliedAt: parsed.date || new Date(),
+          altEmail,
+          locationObjection,
+          // For threading a follow-up as an actual reply in this same thread
+          // rather than a new email — nodemailer's In-Reply-To/References.
+          inReplyToMessageId: parsed.messageId || null,
+          replySubject: parsed.subject || null,
         });
-        onProgress(`✓ Reply from ${contact.companyName || contact.email}: ${replyStatus}`);
+        const flags = [altEmail ? `alt-email: ${altEmail}` : null, locationObjection ? 'location-objection' : null].filter(Boolean);
+        onProgress(`✓ Reply from ${contact.companyName || contact.email}: ${replyStatus}${flags.length ? ` (${flags.join(', ')})` : ''}`);
       }
     } finally {
       lock.release();

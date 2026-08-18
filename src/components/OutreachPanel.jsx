@@ -1,12 +1,20 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database, Rocket } from 'lucide-react';
+import { Search, Send, Mail, RefreshCw, X, Trash2, Sparkles, Newspaper, Database, Rocket, ShieldCheck, Power } from 'lucide-react';
+
+function isSentToday(date) {
+  if (!date) return false;
+  const d = new Date(date);
+  const now = new Date();
+  return d.toDateString() === now.toDateString();
+}
 
 const STATUS_BADGE = {
   pending: 'bg-gray-700/40 text-gray-300 border-gray-600/40',
   sent:    'bg-blue-900/40 text-blue-300 border-blue-700/40',
   skipped: 'bg-gray-700/40 text-gray-400 border-gray-600/40',
   bounced: 'bg-red-900/40 text-red-300 border-red-700/40',
+  invalid: 'bg-orange-900/40 text-orange-300 border-orange-700/40',
 };
 
 const REPLY_BADGE = {
@@ -33,12 +41,62 @@ export default function OutreachPanel({ streamScrape, busy }) {
   const [discoveringYc, setDiscoveringYc] = useState(false);
   const [sending, setSending] = useState(false);
   const [checkingReplies, setCheckingReplies] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [testSending, setTestSending] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [cap, setCap] = useState(175);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [visibleCount, setVisibleCount] = useState(TABLE_PAGE_SIZE);
+  const [identities, setIdentities] = useState([]);
+  const [sendingIdentity, setSendingIdentity] = useState(null); // identityId currently mid-send, or null
+  const [sendCounts, setSendCounts] = useState({}); // identityId -> the "send N now" box value
+  const [savingSettings, setSavingSettings] = useState({}); // identityId -> true while a settings PATCH is in flight
+  const [retryingBounced, setRetryingBounced] = useState(false);
+  const [manualEmail, setManualEmail] = useState('');
+  const [manualCompany, setManualCompany] = useState('');
+  const [manualIdentity, setManualIdentity] = useState('primary');
+  const [manualSending, setManualSending] = useState(false);
+  const [manualResult, setManualResult] = useState(null);
+
+  const loadIdentities = useCallback(async () => {
+    try {
+      const res = await fetch('/api/outreach/identity-settings').then(r => r.json());
+      setIdentities(Array.isArray(res) ? res : []);
+    } catch { setIdentities([]); }
+  }, []);
+
+  useEffect(() => { loadIdentities(); }, [loadIdentities]);
+
+  async function handleToggleAuto(identityId, next) {
+    setIdentities(prev => prev.map(i => i.id === identityId ? { ...i, autoSendEnabled: next } : i));
+    setSavingSettings(prev => ({ ...prev, [identityId]: true }));
+    try {
+      await fetch('/api/outreach/identity-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identityId, autoSendEnabled: next }),
+      });
+    } finally {
+      setSavingSettings(prev => ({ ...prev, [identityId]: false }));
+    }
+  }
+
+  async function handleDailyLimitChange(identityId, value) {
+    const n = Number(value);
+    setIdentities(prev => prev.map(i => i.id === identityId ? { ...i, dailyLimit: value } : i));
+    if (!Number.isFinite(n) || n < 0) return;
+    setSavingSettings(prev => ({ ...prev, [identityId]: true }));
+    try {
+      await fetch('/api/outreach/identity-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identityId, dailyLimit: n }),
+      });
+    } finally {
+      setSavingSettings(prev => ({ ...prev, [identityId]: false }));
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -115,18 +173,67 @@ export default function OutreachPanel({ streamScrape, busy }) {
     }
   }
 
-  async function handleSend() {
+  async function handleSend(identityId, explicitCount) {
+    setSendingIdentity(identityId);
     setSending(true);
     try {
-      await streamScrape('/api/outreach/send', {}, 'Sending outreach emails...');
+      const label = identities.find(i => i.id === identityId)?.label || identityId;
+      const body = explicitCount ? { identityId, explicitCount } : { identityId };
+      const desc = explicitCount
+        ? `Sending ${explicitCount} outreach email(s) via ${label}...`
+        : `Sending outreach emails via ${label}...`;
+      await streamScrape('/api/outreach/send', body, desc);
     } finally {
+      setSendingIdentity(null);
       setSending(false);
       await load();
     }
   }
 
+  async function handleRetryBounced(identityId) {
+    setRetryingBounced(true);
+    try {
+      await streamScrape('/api/outreach/send', { identityId, retryBounced: true }, `Retrying bounced contacts via ${identities.find(i => i.id === identityId)?.label || identityId}...`);
+    } finally {
+      setRetryingBounced(false);
+      await load();
+    }
+  }
+
+  async function handleManualSend() {
+    if (!manualEmail.trim()) return;
+    setManualSending(true);
+    setManualResult(null);
+    try {
+      const res = await fetch('/api/outreach/send-manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: manualEmail.trim(), companyName: manualCompany.trim(), identityId: manualIdentity }),
+      });
+      const data = await res.json();
+      setManualResult(res.ok
+        ? { ok: true, msg: `Sent to ${data.email} via ${data.sentVia}.` }
+        : { ok: false, msg: data.error || 'Send failed' });
+      if (res.ok) { setManualEmail(''); setManualCompany(''); await load(); }
+    } catch (e) {
+      setManualResult({ ok: false, msg: e.message });
+    } finally {
+      setManualSending(false);
+    }
+  }
+
   async function handleStopSend() {
     try { await fetch('/api/outreach/send/stop', { method: 'POST' }); } catch {}
+  }
+
+  async function handleVerifyEmails() {
+    setVerifying(true);
+    try {
+      await streamScrape('/api/outreach/verify-emails', {}, 'Checking pending addresses for a valid mail domain (MX lookup)...');
+    } finally {
+      setVerifying(false);
+      await load();
+    }
   }
 
   async function handleCheckReplies() {
@@ -153,6 +260,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
     pending: contacts.filter(c => c.status === 'pending').length,
     sent: contacts.filter(c => c.status === 'sent').length,
     bounced: contacts.filter(c => c.status === 'bounced').length,
+    invalid: contacts.filter(c => c.status === 'invalid').length,
     replied: contacts.filter(c => !!c.replyStatus).length,
     awaitingReply: contacts.filter(c => c.status === 'sent' && !c.replyStatus).length,
     interested: contacts.filter(c => c.replyStatus === 'interested').length,
@@ -277,33 +385,166 @@ export default function OutreachPanel({ streamScrape, busy }) {
         )}
       </div>
 
-      {/* Bulk send CTA */}
-      <div className="rounded-xl border border-yellow-700/40 bg-yellow-900/10 p-5">
+      {/* Email verification CTA */}
+      <div className="rounded-xl border border-sky-700/40 bg-sky-900/10 p-5">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
-            <h2 className="text-sm font-bold text-yellow-200 flex items-center gap-2">
-              <Send size={14} /> Send to Pending Contacts
+            <h2 className="text-sm font-bold text-sky-200 flex items-center gap-2">
+              <ShieldCheck size={14} /> Verify Pending Addresses
             </h2>
-            <p className="text-xs text-yellow-100/60 mt-1">
-              Rate-limited (20-45s between sends, capped per day) so your Gmail account doesn't get flagged. Generates a unique cover letter per company and attaches your resume.
+            <p className="text-xs text-sky-100/60 mt-1">
+              Checks every pending address&apos;s domain has a real mail server (MX record lookup) before sending — catches typos and dead domains. Bad ones are marked &quot;invalid&quot; and excluded from sends; doesn&apos;t affect Gmail&apos;s own daily limit.
+              {stats.invalid > 0 && <span className="text-red-300"> {stats.invalid} marked invalid so far.</span>}
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button onClick={handleSend} disabled={busy || sending || stats.pending === 0}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-yellow-500 hover:bg-yellow-400
-                text-black font-bold text-sm transition-colors disabled:opacity-40 shadow-lg">
-              <Send size={14} className={sending ? 'animate-pulse' : ''} />
-              {sending ? `Sending... (${stats.pending} pending)` : `Send to ${stats.pending} Pending`}
-            </button>
-            {sending && (
-              <button onClick={handleStopSend}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500
-                  text-white font-bold text-sm transition-colors shadow-lg">
-                <X size={14} /> Stop
-              </button>
-            )}
+          <button onClick={handleVerifyEmails} disabled={busy || verifying || stats.pending === 0}
+            className="shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400
+              text-black font-bold text-sm transition-colors disabled:opacity-40 shadow-lg">
+            <ShieldCheck size={14} className={verifying ? 'animate-pulse' : ''} />
+            {verifying ? 'Verifying...' : `Verify ${stats.pending} Pending`}
+          </button>
+        </div>
+      </div>
+
+      {/* Per-identity send controls */}
+      <div className="rounded-xl border border-yellow-700/40 bg-yellow-900/10 p-5 space-y-4">
+        <div>
+          <h2 className="text-sm font-bold text-yellow-200 flex items-center gap-2">
+            <Send size={14} /> Send to Pending Contacts
+          </h2>
+          <p className="text-xs text-yellow-100/60 mt-1">
+            Rate-limited (20-45s between sends) so neither Gmail account gets flagged. Each identity has its own daily limit, automatic-sending switch, and today's count — automatic + manual sends together can never cross that identity's limit.
+          </p>
+        </div>
+
+        {identities.map(i => {
+          const sentToday = contacts.filter(c => c.status === 'sent' && c.sentFromIdentity === i.id && isSentToday(c.sentAt)).length;
+          const remaining = Math.max(0, (Number(i.dailyLimit) || 0) - sentToday);
+          const count = sendCounts[i.id] ?? '';
+          const isSendingThis = sendingIdentity === i.id;
+          return (
+            <div key={i.id} className="rounded-lg border border-[#30363d] bg-[#0d1117] p-3 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-[#e6edf3]">{i.label}</span>
+                  {!i.configured && <span className="text-[10px] text-red-400">no app password set</span>}
+                  {savingSettings[i.id] && <span className="text-[10px] text-[#8b949e]">saving…</span>}
+                </div>
+                <button
+                  onClick={() => handleToggleAuto(i.id, !i.autoSendEnabled)}
+                  disabled={!i.configured}
+                  title={i.autoSendEnabled ? 'Automatic sending is ON — click to turn off' : 'Automatic sending is OFF — click to turn on'}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-colors disabled:opacity-40 ${
+                    i.autoSendEnabled
+                      ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
+                      : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
+                  }`}>
+                  <Power size={12} />
+                  Automatic sending: {i.autoSendEnabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-end gap-4">
+                <div>
+                  <label className="block text-[10px] text-[#8b949e] mb-1">Daily limit</label>
+                  <input
+                    type="number" min={0} value={i.dailyLimit}
+                    onChange={e => handleDailyLimitChange(i.id, e.target.value)}
+                    disabled={!i.configured}
+                    className="w-24 px-2 py-1.5 rounded-md bg-[#161b22] border border-[#30363d] text-xs text-[#e6edf3] disabled:opacity-40"
+                  />
+                </div>
+                <div className="text-xs text-[#8b949e]">
+                  Sent today: <span className="text-[#e6edf3] font-medium">{sentToday}</span> / {i.dailyLimit} · {remaining} left
+                </div>
+                <div>
+                  <label className="block text-[10px] text-[#8b949e] mb-1">Send this many now</label>
+                  <input
+                    type="number" min={1} placeholder="e.g. 20" value={count}
+                    onChange={e => setSendCounts(prev => ({ ...prev, [i.id]: e.target.value }))}
+                    disabled={!i.configured}
+                    className="w-24 px-2 py-1.5 rounded-md bg-[#161b22] border border-[#30363d] text-xs text-[#e6edf3] placeholder:text-[#484f58] disabled:opacity-40"
+                  />
+                </div>
+                <button
+                  onClick={() => handleSend(i.id, count ? Number(count) : undefined)}
+                  disabled={busy || sending || !i.configured || stats.pending === 0 || remaining === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-yellow-500 hover:bg-yellow-400
+                    text-black font-bold text-xs transition-colors disabled:opacity-40 shadow-lg">
+                  <Send size={13} className={isSendingThis ? 'animate-pulse' : ''} />
+                  {isSendingThis
+                    ? 'Sending...'
+                    : count
+                      ? `Send ${count} now`
+                      : remaining === 0 ? 'Daily limit reached' : `Send (trickle, up to ${remaining} left today)`}
+                </button>
+                {isSendingThis && (
+                  <button onClick={handleStopSend}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl bg-red-600 hover:bg-red-500
+                      text-white font-bold text-xs transition-colors shadow-lg">
+                    <X size={13} /> Stop
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Retry bounced with a different identity */}
+      {stats.bounced > 0 && (
+        <div className="rounded-xl border border-red-700/40 bg-red-900/10 p-5">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-bold text-red-200 flex items-center gap-2">
+                <RefreshCw size={14} /> Retry {stats.bounced} Bounced Contact(s)
+              </h2>
+              <p className="text-xs text-red-100/60 mt-1">
+                Re-sends everything currently marked &quot;bounced&quot; using a chosen identity — useful for retrying via a fresh, unblemished account after the primary&apos;s sending reputation took a hit.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {identities.filter(i => i.configured).map(i => (
+                <button key={i.id} onClick={() => handleRetryBounced(i.id)} disabled={busy || retryingBounced}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500
+                    text-white font-bold text-sm transition-colors disabled:opacity-40 shadow-lg">
+                  <RefreshCw size={14} className={retryingBounced ? 'animate-spin' : ''} />
+                  Retry via {i.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
+      )}
+
+      {/* Manual single send */}
+      <div className="rounded-xl border border-teal-700/40 bg-teal-900/10 p-5">
+        <h2 className="text-sm font-bold text-teal-200 flex items-center gap-2 mb-3">
+          <Mail size={14} /> Send Manually
+        </h2>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input value={manualEmail} onChange={e => setManualEmail(e.target.value)} placeholder="hr@company.com"
+            className="flex-1 px-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-xs text-[#e6edf3] placeholder:text-[#484f58]" />
+          <input value={manualCompany} onChange={e => setManualCompany(e.target.value)} placeholder="Company name (optional)"
+            className="flex-1 px-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-xs text-[#e6edf3] placeholder:text-[#484f58]" />
+          <select value={manualIdentity} onChange={e => setManualIdentity(e.target.value)}
+            className="px-2.5 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-xs text-[#e6edf3]">
+            {identities.map(i => (
+              <option key={i.id} value={i.id} disabled={!i.configured}>
+                {i.label}{!i.configured ? ' (no app password set)' : ''}
+              </option>
+            ))}
+          </select>
+          <button onClick={handleManualSend} disabled={manualSending || !manualEmail.trim()}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-500 hover:bg-teal-400
+              text-black font-bold text-xs transition-colors disabled:opacity-40 shrink-0">
+            <Send size={12} className={manualSending ? 'animate-pulse' : ''} />
+            {manualSending ? 'Sending...' : 'Send Now'}
+          </button>
+        </div>
+        {manualResult && (
+          <p className={`text-xs mt-2 ${manualResult.ok ? 'text-emerald-300' : 'text-red-300'}`}>{manualResult.msg}</p>
+        )}
       </div>
 
       {/* Stats + reply check */}
@@ -313,6 +554,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
           <Stat label="Pending" value={stats.pending} color="text-gray-300" />
           <Stat label="Sent" value={stats.sent} color="text-blue-300" />
           <Stat label="Bounced" value={stats.bounced} color="text-red-400" />
+          <Stat label="Invalid" value={stats.invalid} color="text-orange-400" />
           <Stat label="Replied" value={stats.replied} color="text-amber-300" />
           <Stat label="Awaiting" value={stats.awaitingReply} color="text-gray-400" />
           <Stat label="Interested" value={stats.interested} color="text-emerald-300" />
@@ -339,7 +581,7 @@ export default function OutreachPanel({ streamScrape, busy }) {
         <div className="space-y-3">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div className="flex items-center gap-1.5 flex-wrap">
-              {['all', 'pending', 'sent', 'bounced', 'skipped'].map(s => (
+              {['all', 'pending', 'sent', 'bounced', 'invalid', 'skipped'].map(s => (
                 <button key={s} onClick={() => setStatusFilter(s)}
                   className={`px-2.5 py-1 rounded-full text-xs transition-colors border ${
                     statusFilter === s
@@ -387,9 +629,14 @@ export default function OutreachPanel({ streamScrape, busy }) {
                   </td>
                   <td className="px-4 py-2">
                     <span className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_BADGE[c.status] || STATUS_BADGE.pending}`}
-                      title={c.status === 'bounced' ? (c.lastFailReason || '') : ''}>
+                      title={(c.status === 'bounced' || c.status === 'invalid') ? (c.lastFailReason || '') : ''}>
                       {c.status}
                     </span>
+                    {c.sentFromIdentity && (
+                      <span className="ml-1.5 text-[10px] text-[#8b949e]" title={`Sent via ${identities.find(i => i.id === c.sentFromIdentity)?.label || c.sentFromIdentity}`}>
+                        via {identities.find(i => i.id === c.sentFromIdentity)?.label?.split('@')[0] || c.sentFromIdentity}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2">
                     {c.replyStatus && (

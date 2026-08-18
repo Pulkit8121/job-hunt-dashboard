@@ -8,8 +8,7 @@
 //   - html: same letter with company names and key role/skill terms bolded so a
 //     recruiter's eye catches them when skimming.
 import { PROFILE } from './profile.js';
-
-const SENDER_EMAIL = process.env.SMTP_EMAIL || 'pulkitagarwal2020@gmail.com';
+import { getIdentity } from './identities.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -18,7 +17,8 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-export async function generateCoverLetter(companyName) {
+export async function generateCoverLetter(companyName, identityId = 'primary') {
+  const SENDER_EMAIL = getIdentity(identityId).email;
   const company = (companyName || '').trim();
   const atCompany = company ? ` at ${company}` : '';
   const atCompanyHtml = company ? ` at <strong>${escapeHtml(company)}</strong>` : '';

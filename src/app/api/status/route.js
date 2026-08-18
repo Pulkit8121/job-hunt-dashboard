@@ -1,8 +1,9 @@
 export const dynamic = 'force-dynamic';
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { readApplied, readOutreachContacts } from '@/lib/db';
+import { getAppliedCounts, getOutreachCounts } from '@/lib/db';
 import { isRunning as naukriRunning } from '@/lib/naukriRunState';
 import { isRunning as naukriBroadRunning } from '@/lib/naukriBroadRunState';
 import { isRunning as companyPortalRunning } from '@/lib/companyPortalRunState';
@@ -14,13 +15,78 @@ import { isRunning as outreachRunning } from '@/lib/outreachRunState';
 const LOG_DIR = '/root/jobhunt-cron/logs';
 
 const PIPELINES = [
-  { id: 'naukri-apply',    label: 'Naukri Apply',        logFile: 'naukri-pipeline.log',      cron: 'Every 4h (:00)',        isRunning: naukriRunning },
+  { id: 'naukri-apply',    label: 'Naukri Apply',        logFile: 'naukri-pipeline.log',      cron: 'Every 15 min',          isRunning: naukriRunning },
   { id: 'naukri-broad',    label: 'Naukri Broad Scrape',  logFile: 'naukri-broad-scrape.log',  cron: '03:30, 15:30 UTC',      isRunning: naukriBroadRunning },
-  { id: 'company-portal',  label: 'Company Portals',      logFile: 'company-portal.log',       cron: '06:30, 18:30 UTC',      isRunning: companyPortalRunning },
+  { id: 'company-portal',  label: 'Company Portals',      logFile: 'company-portal.log',       cron: 'Every 15 min (offset)', isRunning: companyPortalRunning },
   { id: 'wellfound',       label: 'Wellfound',            logFile: 'wellfound.log',            cron: '09:30, 21:30 UTC',      isRunning: wellfoundRunning },
-  { id: 'outreach-send',   label: 'Outreach — Send',      logFile: 'outreach-send.log',        cron: 'Every hour (:45)',      isRunning: outreachRunning },
+  { id: 'outreach-send',   label: 'Outreach — Send',      logFile: 'outreach-send.log',        cron: 'Manual (cron removed)', isRunning: outreachRunning },
   { id: 'outreach-discover', label: 'Outreach — Discover', logFile: 'outreach-discover.log',   cron: 'Every 4h (:30)',        isRunning: null },
+  { id: 'ats-sweep',       label: 'ATS Sweep',            logFile: 'ats-sweep.log',            cron: 'Every 6h (:20)',        isRunning: null },
 ];
+
+// Load-gate + browser-lock skip messages land as plain (non-"data:") lines in
+// the same cron logs — surface the most recent one so a quiet cycle is
+// legible as "skipped, system was busy" rather than looking like nothing ran.
+function readLastSkip(logFile) {
+  const filePath = path.join(LOG_DIR, logFile);
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+  const tail = raw.slice(-50000);
+  const lines = tail.split('\n').filter(l => /load-gate closed|browser lock busy/.test(l));
+  return lines.length ? lines[lines.length - 1].trim() : null;
+}
+
+const LOAD_GATE_HIGH = 4.0;
+const SWAP_GATE_PCT = 80;
+
+function readSwapPercent() {
+  try {
+    const meminfo = fs.readFileSync('/proc/meminfo', 'utf-8');
+    const total = Number(meminfo.match(/SwapTotal:\s+(\d+)/)?.[1] || 0);
+    const free = Number(meminfo.match(/SwapFree:\s+(\d+)/)?.[1] || 0);
+    return total > 0 ? Math.round(((total - free) / total) * 100) : 0;
+  } catch {
+    return null;
+  }
+}
+
+function readDiskPercent() {
+  try {
+    // statfsSync isn't in older Node — fall back gracefully if unavailable.
+    const stat = fs.statfsSync('/');
+    const used = stat.blocks - stat.bfree;
+    return Math.round((used / stat.blocks) * 100);
+  } catch {
+    return null;
+  }
+}
+
+function readSystemHealth() {
+  const [load1, load5, load15] = os.loadavg();
+  const swapPercent = readSwapPercent();
+  const diskPercent = readDiskPercent();
+  const cpuCount = os.cpus().length;
+  const memTotal = os.totalmem();
+  const memFree = os.freemem();
+  const memPercent = Math.round(((memTotal - memFree) / memTotal) * 100);
+
+  const gated = load1 > LOAD_GATE_HIGH || (swapPercent !== null && swapPercent > SWAP_GATE_PCT);
+
+  return {
+    load1, load5, load15,
+    cpuCount,
+    memPercent,
+    swapPercent,
+    diskPercent,
+    gated, // true when the load-gate would currently skip a new cron cycle
+    loadGateThreshold: LOAD_GATE_HIGH,
+    swapGateThreshold: SWAP_GATE_PCT,
+  };
+}
 
 // Parses the tail of a cron log for the most recent run's start time and its
 // last meaningful message (DONE/FATAL/STOPPED line, or the latest progress
@@ -72,25 +138,20 @@ export async function GET() {
     label: p.label,
     cron: p.cron,
     running: p.isRunning ? p.isRunning() : null,
+    lastSkip: readLastSkip(p.logFile),
     ...readLastRun(p.logFile),
   }));
 
-  const applied = await readApplied().catch(() => []);
-  const bySource = {};
-  for (const a of applied) bySource[a.source || 'unknown'] = (bySource[a.source || 'unknown'] || 0) + 1;
+  const systemHealth = readSystemHealth();
 
-  const contacts = await readOutreachContacts().catch(() => []);
-  const outreachStats = {
-    total: contacts.length,
-    pending: contacts.filter(c => c.status === 'pending').length,
-    sent: contacts.filter(c => c.status === 'sent').length,
-    bounced: contacts.filter(c => c.status === 'bounced').length,
-  };
+  const appliedTotals = await getAppliedCounts().catch(() => ({ total: 0, bySource: {} }));
+  const outreachStats = await getOutreachCounts().catch(() => ({ total: 0, pending: 0, sent: 0, bounced: 0 }));
 
   return Response.json({
     generatedAt: new Date().toISOString(),
+    systemHealth,
     pipelines,
-    appliedTotals: { total: applied.length, bySource },
+    appliedTotals,
     outreachStats,
   });
 }

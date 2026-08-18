@@ -45,20 +45,56 @@ function stripHtml(html) {
   return (html || '')
     .replace(/<a [^>]*href="([^"]+)"[^>]*>.*?<\/a>/gi, '$1')
     .replace(/<[^>]+>/g, ' ')
+    // Numeric entities first (HN escapes "/" as &#x2F;, which the named-entity
+    // list below never covered — that garbage used to leak straight into
+    // outreach email subject lines via extractCompanyName's raw-text fallback).
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
     .replace(/&amp;/g, '&').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&quot;/g, '"').replace(/&#x27;/g, "'")
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+// A pipe-delimited first field only "looks like" a company name if it's
+// short and doesn't read as a sentence — rejects free-form posts that never
+// used the ' | ' convention at all (so the "first field" is the whole first
+// sentence) instead of accepting anything under an 80-char ceiling, which is
+// how prose like "I'm hiring flutter developers (or interested in..." used to
+// pass through and land verbatim in a real outreach email's subject line.
+function looksLikeCompanyName(candidate) {
+  if (!candidate) return false;
+  if (candidate.length > 50) return false;
+  if (/^(i'm|i am|we're|we are|looking for|seeking|hiring)\b/i.test(candidate)) return false;
+  if (/https?:\/\//i.test(candidate)) return false;
+  if (/[.!?]$/.test(candidate)) return false; // sentences end in punctuation, names don't
+  return true;
+}
+
+// "www.integrate.com" -> "Integrate"
+function nameFromDomain(host) {
+  if (!host) return null;
+  const label = host.replace(/^www\./i, '').split('.')[0];
+  if (!label) return null;
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 // HN "who is hiring" listings conventionally lead with the company name, e.g.
-// "Acme Corp | Remote | Full-time | https://acme.com" — take the text up to
-// the first pipe/newline as a best-effort company name. Falls back to a
-// truncated snippet of the comment when that heuristic doesn't apply.
-function extractCompanyName(text) {
-  const firstLine = (text.split(/ \| /)[0] || '').trim();
-  if (firstLine && firstLine.length <= 80) return firstLine;
-  const snippet = text.slice(0, 60).trim();
-  return snippet || "HN Who's Hiring contact";
+// "Acme Corp | Remote | Full-time | https://acme.com". When a post doesn't
+// follow that convention, derive a name from the company's own domain
+// (first from a URL in the post, then from the contact email itself) instead
+// of falling back to a raw, possibly mid-word-truncated text slice.
+function extractCompanyName(text, email) {
+  const firstField = (text.split(/ \| /)[0] || '').trim();
+  if (looksLikeCompanyName(firstField)) return firstField;
+
+  const urlMatch = text.match(/https?:\/\/([^\s/]+)/i);
+  const fromUrl = nameFromDomain(urlMatch?.[1]);
+  if (fromUrl) return fromUrl;
+
+  const fromEmail = nameFromDomain((email || '').split('@')[1]);
+  if (fromEmail) return fromEmail;
+
+  return "HN Who's Hiring contact";
 }
 
 // Best-effort region classification — not a geo database, just keyword
@@ -125,7 +161,7 @@ async function scrapeThread(thread) {
     const email = [...text.matchAll(EMAIL_RE)].map(m => m[0].toLowerCase()).find(e => !isJunkEmail(e));
     if (!email) continue;
     const { location, region } = extractLocationAndRegion(text);
-    contacts.push({ companyName: extractCompanyName(text), email, location, region, threadTitle: thread.title });
+    contacts.push({ companyName: extractCompanyName(text, email), email, location, region, threadTitle: thread.title });
   }
   return contacts;
 }

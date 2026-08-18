@@ -41,3 +41,4 @@ data/resume.pdf
 .turbo
 .claude/
 .aider*
+data/*.pdf

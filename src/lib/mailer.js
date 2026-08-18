@@ -1,20 +1,24 @@
 import path from 'path';
+import { getIdentity } from './identities.js';
 
-let transporter = null;
+// One transporter per identity (two separate Gmail accounts, two separate SMTP
+// sessions) — cached by identity id so repeated sends don't reconnect each time.
+const transporters = new Map();
 
-async function getTransporter() {
-  if (transporter) return transporter;
+async function getTransporter(identity) {
+  if (transporters.has(identity.id)) return transporters.get(identity.id);
   const nodemailer = (await import('nodemailer')).default;
-  transporter = nodemailer.createTransport({
+  const t = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
     secure: true,
     auth: {
-      user: process.env.SMTP_EMAIL,
-      pass: process.env.SMTP_APP_PASSWORD,
+      user: identity.email,
+      pass: identity.appPassword,
     },
   });
-  return transporter;
+  transporters.set(identity.id, t);
+  return t;
 }
 
 // Gmail renders plain-text-only emails in a small default font. We send an HTML
@@ -35,16 +39,41 @@ function textToHtml(text) {
   return wrapHtml(escaped);
 }
 
-export async function sendOutreachEmail({ to, subject, text, html }) {
-  const resumePath = path.resolve(process.cwd(), process.env.RESUME_PATH || './data/resume.pdf');
-  const t = await getTransporter();
+// inReplyTo: the Message-ID of the email being replied to — when set, this
+// goes out as an actual threaded reply (In-Reply-To/References headers) that
+// lands in the same conversation in the recipient's client, not a new email.
+export async function sendOutreachEmail({ to, subject, text, html, identityId = 'primary', inReplyTo }) {
+  const identity = getIdentity(identityId);
+  if (!identity.appPassword) {
+    throw new Error(`Identity "${identityId}" has no app password configured — cannot send.`);
+  }
+  const resumePath = path.resolve(process.cwd(), identity.resumePath);
+  const t = await getTransporter(identity);
   return t.sendMail({
-    from: `"${process.env.SMTP_FROM_NAME || 'Pulkit Agarwal'}" <${process.env.SMTP_EMAIL}>`,
+    from: `"${identity.displayName}" <${identity.email}>`,
     to,
     subject,
     text,
     html: html ? wrapHtml(html) : textToHtml(text),
-    attachments: [{ filename: 'Pulkit_Agarwal_Resume.pdf', path: resumePath }],
+    attachments: [{ filename: identity.resumeFilename, path: resumePath }],
+    ...(inReplyTo ? { inReplyTo, references: inReplyTo } : {}),
+  });
+}
+
+// For internal notifications (e.g. the nightly report) — no resume attachment,
+// sent from whichever identity is asked (defaults to primary).
+export async function sendPlainEmail({ to, subject, text, html, identityId = 'primary' }) {
+  const identity = getIdentity(identityId);
+  if (!identity.appPassword) {
+    throw new Error(`Identity "${identityId}" has no app password configured — cannot send.`);
+  }
+  const t = await getTransporter(identity);
+  return t.sendMail({
+    from: `"${identity.displayName}" <${identity.email}>`,
+    to,
+    subject,
+    text,
+    html: html ? wrapHtml(html) : textToHtml(text),
   });
 }
 

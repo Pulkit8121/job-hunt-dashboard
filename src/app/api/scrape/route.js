@@ -4,7 +4,8 @@ export const dynamic = 'force-dynamic';
 import { readCompanies, replaceJobsForCompany, updateCompanyScraped } from '@/lib/db';
 import { scrapeCompany } from '@/lib/scraper';
 import { cacheGet, cacheSet, cacheDel } from '@/lib/cache';
-import { getBrowser } from '@/lib/browser.js';
+import { getBrowser, closeBrowserSafely } from '@/lib/browser.js';
+import { startRun, finishRun, isRunning } from '@/lib/scrapeRunState';
 
 export async function POST(request) {
   const { companyId, bust } = await request.json();
@@ -13,12 +14,27 @@ export async function POST(request) {
   const writer = stream.writable.getWriter();
   const send = (msg) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: msg })}\n\n`)).catch(() => {});
 
+  // A client that gives up (curl --max-time, closed tab) used to leave this
+  // loop running forever server-side with no way to stop it or start a fresh
+  // one — confirmed cause of a ~2-day stuck run that held the shared browser
+  // lock the whole time. One in-flight scrape at a time, always stoppable.
+  if (isRunning()) {
+    send('⚠ A scrape is already in progress. Wait for it to finish or time out.');
+    writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+    });
+  }
+
+  const controller = startRun();
+  const signal = controller.signal;
+
   (async () => {
     let browser;
+    let connected = false;
     try {
       // Use enhanced browser with anti-detection
-      const browserResult = await getBrowser({ headless: true });
-      browser = browserResult.browser;
+      ({ browser, connected } = await getBrowser({ headless: true, requireConnected: false, preferConnected: false }));
 
       const all = await readCompanies();
       const targets = companyId === 'all' ? all : all.filter(c => c.id === companyId);
@@ -30,6 +46,7 @@ export async function POST(request) {
       let totalFound = 0;
 
       for (const company of targets) {
+        if (signal.aborted) { send('⏹ Stopped — client disconnected or run superseded.'); break; }
         try {
           const cacheKey = `jobs:${company.id}`;
 
@@ -63,14 +80,17 @@ export async function POST(request) {
         }
       }
 
-      send(`DONE:${totalFound} jobs found across ${targets.length} companies.`);
+      if (!signal.aborted) send(`DONE:${totalFound} jobs found across ${targets.length} companies.`);
     } catch (e) {
       send(`FATAL:${e.message}`);
     } finally {
-      try { await browser?.close(); } catch {}
-      writer.close();
+      await closeBrowserSafely(browser, connected);
+      finishRun();
+      writer.close().catch(() => {});
     }
   })();
+
+  request.signal?.addEventListener?.('abort', () => controller.abort());
 
   return new Response(stream.readable, {
     headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },

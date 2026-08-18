@@ -21,14 +21,18 @@ function parseDsn(text) {
 // contactEmails: Set of lowercased emails currently marked 'sent', to only
 // return bounces relevant to our own outreach (not any random bounce in the
 // inbox from other mail this account has sent).
-export async function checkBounces(contactEmails, { since, onProgress = () => {} } = {}) {
+// identity: which mailbox to check — a bounce for a message sent from
+// pa.devworks@gmail.com arrives in THAT inbox, not pulkitagarwal2020's.
+export async function checkBounces(contactEmails, { since, identity, onProgress = () => {} } = {}) {
   const { ImapFlow } = await import('imapflow');
+  const { getIdentity } = await import('./identities.js');
+  const id = identity || getIdentity('primary');
 
   const client = new ImapFlow({
     host: 'imap.gmail.com',
     port: 993,
     secure: true,
-    auth: { user: process.env.SMTP_EMAIL, pass: process.env.SMTP_APP_PASSWORD },
+    auth: { user: id.email, pass: id.appPassword },
     logger: false,
   });
 

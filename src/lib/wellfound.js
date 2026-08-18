@@ -68,7 +68,7 @@ export const WF_SEARCH_PHASES = [
 export async function wellfoundLogin(page, email, password) {
   try {
     // Navigate to login page
-    await page.goto('https://wellfound.com/login', { waitUntil: 'networkidle' });
+    await page.goto('https://wellfound.com/login', { waitUntil: 'networkidle2' });
     
     // Check for CAPTCHA before login
     const captchaDetected = await detectCaptcha(page);
@@ -107,7 +107,7 @@ export async function wellfoundLogin(page, email, password) {
     }
     
     // Wait for navigation or load
-    await page.waitForLoadState('networkidle');
+    await wait(2500);
     
     // Verify successful login by checking for profile elements or dashboard
     const loggedIn = await page.evaluate(() => {
@@ -137,10 +137,10 @@ export async function wellfoundLogin(page, email, password) {
 export async function scrapeWellfoundJobCards(page, url) {
   try {
     // Navigate to search URL
-    await page.goto(url, { waitUntil: 'networkidle' });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
     
     // Wait for jobs to load
-    await page.waitForTimeout(3000);
+    await wait(5000);
     
     // Detect and handle CAPTCHA if needed on job listing page
     const captchaDetected = await detectCaptcha(page);
@@ -151,7 +151,7 @@ export async function scrapeWellfoundJobCards(page, url) {
         const submitSuccess = await captchaSolver.submitSolution(page, solution);
         if (submitSuccess) {
           // Re-fetch the job cards after solving CAPTCHA
-          await page.waitForTimeout(2000);
+          await wait(2000);
         }
       }
     }
@@ -159,47 +159,60 @@ export async function scrapeWellfoundJobCards(page, url) {
     // Extract job card information using nodriver's evaluation methods
     const jobs = await page.evaluate(() => {
       const jobCards = [];
+      const seen = new Set();
       
-      // Look for job listing elements
-      // Wellfound typically has job cards with specific classes
-      const selectors = [
-        '[data-test="job-card"]',
-        '.job-card',
-        'a[href^="/jobs/"]'
-      ];
-      
-      for (const selector of selectors) {
-        const elements = document.querySelectorAll(selector);
-        if (elements.length > 0) {
-          elements.forEach(el => {
-            try {
-              // Try to extract job information from each card
-              const titleElement = el.querySelector('h2, [data-test="job-title"], .job-card-title');
-              const companyElement = el.querySelector('[data-test="company-name"], .company-name, .job-card-company');
-              const locationElement = el.querySelector('span[aria-label*="location"], [data-test="job-location"]');
-              
-              const job = {
-                cardUrl: el.getAttribute('href') || (el.closest('a') ? el.closest('a').href : ''),
-                title: titleElement?.textContent.trim() || 'Unknown',
-                company: companyElement?.textContent.trim() || 'Unknown Company',
-                location: locationElement?.textContent.trim() || 'Remote'
-              };
-              
-              // Try to find apply URL specifically if available
-              const applyButton = el.querySelector('a[href*="apply"], button[data-test*="apply"]');
-              if (applyButton) {
-                job.applyUrl = applyButton.getAttribute('href') || job.cardUrl;
-              }
-              
-              jobCards.push(job);
-            } catch (e) {
-              // Skip invalid cards
-            }
-          });
-          break; // Found and processed jobs with this selector, stop trying others
-        }
+      function clean(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim();
       }
-      
+
+      function push(job) {
+        const key = job.cardUrl || `${job.title}:${job.company}`;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        jobCards.push(job);
+      }
+
+      const anchors = Array.from(document.querySelectorAll('a[href*="/jobs/"]'));
+      for (const anchor of anchors) {
+        try {
+          const href = anchor.getAttribute('href') || '';
+          if (!/\/jobs\/\d+[-/a-z0-9]*/i.test(href)) continue;
+
+          const text = clean(anchor.textContent || '');
+          if (!text || text.length < 6) continue;
+
+          const card = anchor.closest('article, section, li, div');
+          const cardText = clean(card?.innerText || text);
+
+          const companyLink =
+            card?.querySelector('a[href*="/company/"]') ||
+            anchor.closest('section, article, li, div')?.querySelector('a[href*="/company/"]');
+          const company = clean(companyLink?.textContent || '') || 'Unknown Company';
+
+          const title =
+            clean(anchor.querySelector('h1, h2, h3, h4, [data-test*="title"]')?.textContent || text)
+              .replace(/recruiter recently active.*$/i, '')
+              .replace(/posted .*$/i, '')
+              .replace(/save.*$/i, '')
+              .replace(/learn more.*$/i, '')
+              .trim();
+
+          const location = clean(
+            cardText
+              .replace(text, '')
+              .replace(company, '')
+          ).slice(0, 300);
+
+          push({
+            cardUrl: href.startsWith('http') ? href : `https://wellfound.com${href}`,
+            applyUrl: href.startsWith('http') ? href : `https://wellfound.com${href}`,
+            title: title || text,
+            company,
+            location: location || 'Unknown',
+          });
+        } catch {}
+      }
+
       return jobCards;
     });
     
@@ -230,10 +243,10 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
       jobUrl = 'https://wellfound.com' + jobUrl;
     }
     
-    await page.goto(jobUrl, { waitUntil: 'networkidle' });
+    await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 120000 });
     
     // Wait a bit for page to load
-    await page.waitForTimeout(2000);
+    await wait(2000);
     
     // Handle CAPTCHA if it appears on job details page
     const captchaDetected = await detectCaptcha(page);
@@ -244,8 +257,8 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
         const submitSuccess = await captchaSolver.submitSolution(page, solution);
         if (submitSuccess) {
           // Re-navigate to the same URL after solving CAPTCHA
-          await page.goto(jobUrl, { waitUntil: 'networkidle' });
-          await page.waitForTimeout(2000);
+          await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 120000 });
+          await wait(2000);
         } else {
           sendMessage('⚠ Could not submit CAPTCHA solution');
         }
@@ -290,7 +303,7 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
         applyButton = await page.$('[data-test="job-card"]');
         if (applyButton) {
           await applyButton.click();
-          await page.waitForTimeout(2000);
+          await wait(2000);
           
           // Try finding apply button after expanding details
           const innerApplySelectors = [
@@ -318,7 +331,7 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
       sendMessage(`⚡ Applying to: ${job.title || 'Unknown'} at ${job.company || 'Unknown'}`);
       
       await applyButton.click();
-      await page.waitForLoadState('networkidle');
+      await wait(3000);
       
       // Handle CAPTCHA during application form
       const formCaptchaDetected = await detectCaptcha(page);
@@ -338,7 +351,7 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
       
       // Try to complete the application - this is where a lot of the automation
       // complexity lies, as each company might have different forms
-      await page.waitForTimeout(3000);
+      await wait(3000);
       
       // The exact application process varies by company, so we'll just simulate
       // sending a basic application that would be typical for most listings
@@ -369,10 +382,10 @@ export async function applyToWellfoundJob(page, job, sendMessage) {
 export async function setupWellfoundProfile(page, sendMessage) {
   try {
     // Navigate to profile settings page
-    await page.goto('https://wellfound.com/me/profile', { waitUntil: 'networkidle' });
+    await page.goto('https://wellfound.com/me/profile', { waitUntil: 'networkidle2', timeout: 120000 });
     
     // Wait for page to load and detect CAPTCHA
-    await page.waitForTimeout(2000);
+    await wait(2000);
     
     const captchaDetected = await detectCaptcha(page);
     if (captchaDetected) {
@@ -381,7 +394,7 @@ export async function setupWellfoundProfile(page, sendMessage) {
       if (solution) {
         const submitSuccess = await captchaSolver.submitSolution(page, solution);
         if (submitSuccess) {
-          await page.waitForTimeout(2000);
+          await wait(2000);
         }
       }
     }
