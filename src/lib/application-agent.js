@@ -6,6 +6,7 @@
 // src/lib/ai.js.
 import { PROFILE } from './profile.js';
 import { completeText } from './llm.js';
+import { readAnswerCache, saveAnswer } from './db.js';
 
 // Order matters — more specific patterns must come before generic ones that
 // could otherwise over-match (e.g. "location" is generic; "linkedin" isn't).
@@ -45,7 +46,24 @@ const FIELD_RULES = [
   { test: /sponsor/i, value: () => (PROFILE.eeo.requiresSponsorship ? 'Yes' : 'No'), kind: 'choice' },
   // Bare "visa status"-style prompts: state the real position rather than a yes/no.
   { test: /visa/i, value: () => 'Requires sponsorship — Indian citizen, no US work authorization', kind: 'text' },
-  { test: /(?:current|preferred)\s*(?:location|city)|based in|where are you located/i, value: () => PROFILE.currentLocation, kind: 'text' },
+  { test: /(?:current|preferred)\s*(?:location|city)|based in|where are you (?:currently )?located/i, value: () => PROFILE.currentLocation, kind: 'text' },
+  // Each of these was measured going to the LLM on a single live Greenhouse
+  // form, at ~1.3s a call. They have one correct answer from the profile, so
+  // paying a model round trip for them is pure waste — and the free-text
+  // answers it produced were worse than the deterministic ones.
+  { test: /desired salary|salary expectation|expected compensation|compensation expectation/i, value: () => '14 LPA', kind: 'text' },
+  { test: /(?:preferred )?start date|when can you start|availability to start/i, value: () => 'Immediate (15 days notice)', kind: 'text' },
+  { test: /years of (?:relevant )?(?:work )?experience|how many years/i, value: () => String(PROFILE.experienceYears), kind: 'text' },
+  { test: /willing to work overtime|able to work overtime/i, value: () => 'Yes', kind: 'choice' },
+  { test: /may we contact your current employer|contact your present employer/i, value: () => 'No', kind: 'choice' },
+  { test: /able to perform the essential function/i, value: () => 'Yes', kind: 'choice' },
+  { test: /friends or relatives|know anyone (?:who works|at)/i, value: () => 'No', kind: 'choice' },
+  { test: /military (?:service|experience)/i, value: () => 'No', kind: 'choice' },
+  // Consent/certification checkboxes on employment applications. These are
+  // affirmations of the applicant's own statements, not questions.
+  { test: /i (?:hereby )?(?:certify|agree|authorize|acknowledge|understand)|applicant.s certification/i, value: () => 'Yes', kind: 'choice' },
+  { test: /graduation (?:completion )?year|year of graduation/i, value: () => '2021', kind: 'text' },
+  { test: /highest (?:level of )?education|education status|degree/i, value: () => "Bachelor's Degree", kind: 'text' },
   { test: /relocat/i, value: () => 'Yes', kind: 'choice' },
   { test: /remote/i, value: () => 'Yes', kind: 'choice' },
 ];
@@ -86,6 +104,30 @@ export function matchChoice(options = [], target = '') {
   return options.length <= 4 ? options[0] : null;
 }
 
+// Model output that still contains a fill-in-the-blank slot must never be
+// submitted. Measured live: "Where are you currently located?" came back as
+// "I am currently located in [Your City]", which would have gone into a real
+// application verbatim.
+function looksTemplated(text = '') {
+  return /\[[^\]]{2,40}\]|\{\{|\byour (?:city|name|company|title)\b|<[a-z ]+>/i.test(text);
+}
+
+// Answers are cached across runs, keyed by question + options. Without this
+// every application re-asked the model the same questions: one live Greenhouse
+// form alone made 28 calls totalling 37.8s of pure answering, and repeated
+// questions came back inconsistent — "May we contact your current employer?"
+// got "No, I would prefer..." on one field and "Yes, you may contact..." on
+// the duplicate of the same question on the same page.
+let cachePromise = null;
+function getCache() {
+  if (!cachePromise) cachePromise = readAnswerCache().catch(() => new Map());
+  return cachePromise;
+}
+
+function cacheKey(label, options = []) {
+  return `${label.trim().toLowerCase()}||${options.map(o => o.trim().toLowerCase()).sort().join('|')}`;
+}
+
 async function generateOpenEndedAnswer(label, job) {
   const prompt = `You are answering a job application question on behalf of ${PROFILE.name}, a ${PROFILE.title} with ~${PROFILE.experienceYears} years of experience.
 
@@ -100,7 +142,9 @@ Question: "${label}"
 Reply with ONLY the answer text (2-4 sentences, first person, no preamble, no markdown).`;
 
   // null when no provider answered — caller leaves the field blank rather than guess
-  return completeText(prompt, { temperature: 0.4 });
+  const text = await completeText(prompt, { temperature: 0.4 });
+  if (!text || looksTemplated(text)) return null;
+  return text;
 }
 
 // field: { label, kind: 'text'|'choice', options?: string[] }
@@ -126,5 +170,16 @@ export async function answerField(field, job) {
     return null;
   }
 
-  return generateOpenEndedAnswer(label, job);
+  const key = cacheKey(label, field.options);
+  const cache = await getCache();
+  if (cache.has(key)) return cache.get(key);
+
+  const answer = await generateOpenEndedAnswer(label, job);
+  if (!answer) return null;
+
+  cache.set(key, answer);
+  // Persist so the next application answers this question for free, and
+  // identically.
+  saveAnswer({ key, question: label, answer, source: 'ai' }).catch(() => {});
+  return answer;
 }

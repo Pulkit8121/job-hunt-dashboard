@@ -56,12 +56,35 @@ async function extractFields(page) {
       const wrapping = el.closest('label');
       if (wrapping && wrapping.textContent.trim()) return wrapping.textContent.trim();
       if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+
+      // Container fallback, but ONLY when the container holds this one field.
+      // Measured on a live Greenhouse form: a wide container matched by
+      // [class*="field"] wrapped 8 distinct inputs, so every one of them read
+      // back the container's first label — all eight were labelled
+      // "First Name*" and all eight were filled with the first name. Requiring
+      // the container to be single-field makes that impossible.
       const group = el.closest('[class*="field" i], [class*="question" i], fieldset, [role="group"]');
       if (group) {
-        const heading = group.querySelector('label, legend, [class*="label" i]');
-        if (heading && heading.textContent.trim() && heading !== el) return heading.textContent.trim();
+        const fieldsInGroup = group.querySelectorAll('input:not([type=hidden]), select, textarea');
+        if (fieldsInGroup.length === 1) {
+          const heading = group.querySelector('label, legend, [class*="label" i]');
+          if (heading && heading.textContent.trim() && heading !== el) return heading.textContent.trim();
+        }
       }
-      return el.placeholder || el.name || '';
+      return el.placeholder || el.getAttribute('aria-labelledby') ? '' : (el.placeholder || el.name || '');
+    }
+
+    // Fields that must never be touched by the answering agent.
+    // - g-recaptcha-response is the CAPTCHA token slot; a live run wrote an
+    //   LLM-generated sentence into it.
+    // - honeypots are bot traps: filling them flags the submission.
+    // - a field with no discoverable label is unanswerable, and guessing
+    //   produced a generic cover-letter blob in seven unrelated inputs.
+    function isUnanswerable(el, label) {
+      const name = (el.name || el.id || '').toLowerCase();
+      if (/recaptcha|captcha|csrf|token|honeypot|__|bot-?field/.test(name)) return true;
+      if (el.autocomplete === 'off' && /^(url|website)$/.test(name) && !label) return true;
+      return !label || label.length < 2;
     }
 
     const results = [];
@@ -73,6 +96,14 @@ async function extractFields(page) {
       if (el.type === 'hidden' || el.type === 'submit' || el.type === 'button' || el.type === 'image') return;
 
       const refId = `agent-field-${i++}`;
+      const elLabel = labelFor(el);
+
+      // File inputs are matched by count/label downstream, and choice groups
+      // carry their own labels, so only free-text fields are gated here.
+      if (el.type !== 'file' && el.type !== 'radio' && el.type !== 'checkbox'
+          && el.tagName !== 'SELECT' && isUnanswerable(el, elLabel)) {
+        return;
+      }
 
       if (el.type === 'radio' || el.type === 'checkbox') {
         const groupKey = el.name || refId;

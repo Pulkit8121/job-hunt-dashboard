@@ -46,6 +46,16 @@ function autoConcurrency() {
   const cores = os.cpus()?.length || 2;
   return Math.max(2, Math.min(16, (cores - 1) * 2));
 }
+
+// A tick must finish inside its cron interval. If it overruns, the next tick
+// is refused by isRunning() and — worse — the SSE client gives up, aborting
+// the run and stranding every claimed-but-unprocessed row as in-progress.
+// Observed in production: stranded rows grew 48 -> 93 while pending fell to
+// 111, i.e. the queue was leaking into a state nothing was draining.
+//
+// Claiming only what can be finished in the window prevents the strand at
+// source, rather than relying on the stale-release to mop it up afterwards.
+const TICK_BUDGET_MS = Number(process.env.PORTAL_TICK_BUDGET_MS) || 8 * 60 * 1000;
 const APPLY_CONCURRENCY = Number(process.env.PORTAL_APPLY_CONCURRENCY) || autoConcurrency();
 
 async function mapWithConcurrency(items, limit, fn) {
@@ -96,10 +106,18 @@ export async function POST(request) {
       // 15-minute cycle. /api/portal-queue/refresh fills the queue on a slow
       // cadence; this drains it on a fast one, so a tick starts submitting
       // within seconds and can safely run every few minutes.
-      const batchSize = Number(reqBody.batchSize) || Number(process.env.PORTAL_APPLY_BATCH) || 60;
+      // Sized to the box rather than a fixed 60. With answering now costing
+      // ~1s instead of ~38s a job runs about 20s, so a 2-core host at
+      // concurrency 2 clears roughly 2 x (8min / 20s) = 48 per tick; the 0.8
+      // factor leaves headroom for the slow tail.
+      const perJobMs = Number(process.env.PORTAL_AVG_JOB_MS) || 20000;
+      const fitsInWindow = Math.floor((TICK_BUDGET_MS / perJobMs) * APPLY_CONCURRENCY * 0.8);
+      const batchSize = Number(reqBody.batchSize) || Number(process.env.PORTAL_APPLY_BATCH) || Math.max(8, fitsInWindow);
       const dailyCap  = Number(reqBody.dailyCap)  || Number(process.env.PORTAL_DAILY_CAP)  || 2000;
 
-      const released = await releaseStalePortalJobs({ olderThanMinutes: 30 });
+      // 12 minutes, not 30: a stranded row should come back on the very next
+      // tick, not three ticks later.
+      const released = await releaseStalePortalJobs({ olderThanMinutes: Number(process.env.PORTAL_STALE_MINUTES) || 12 });
       if (released) await send(`↻ Returned ${released} stalled job(s) to pending.`);
 
       // Applications are irreversible, so the cap is measured against what was
@@ -137,8 +155,18 @@ export async function POST(request) {
         if (skippedEntries.length) await recordSkipped(skippedEntries.splice(0)).catch(() => {});
       };
 
+      const deadline = Date.now() + TICK_BUDGET_MS;
+      const unprocessed = [];
+
       await mapWithConcurrency(claimed, APPLY_CONCURRENCY, async (job) => {
-        if (signal.aborted) return;
+        if (signal.aborted || Date.now() > deadline) {
+          // Hand it straight back rather than leaving it claimed — an
+          // abandoned in-progress row is invisible to the queue until the
+          // stale sweep notices it.
+          unprocessed.push(job);
+          await markPortalJob(job.link, 'pending', null);
+          return;
+        }
 
         await send(`⚡ Applying: ${job.title} at ${job.companyName} (${job.atsType})...`);
         const result = await Promise.race([
@@ -149,7 +177,11 @@ export async function POST(request) {
             companyName: job.companyName,
             location: job.location,
           }),
-          new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'job-timed-out' }), 120000)),
+          // 60s, down from 120s. Timeouts were 38 of 39 on Greenhouse and the
+          // cause was answering, not the page: 28 LLM calls totalling 37.8s on
+          // one form. With rules and a cross-run cache that is ~1s, so 120s is
+          // no longer buying anything except two minutes of a scarce slot.
+          new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'job-timed-out' }), Number(process.env.PORTAL_JOB_TIMEOUT_MS) || 60000)),
         ]);
 
         if (result.success) {
@@ -180,6 +212,10 @@ export async function POST(request) {
       });
 
       await flush();
+
+      if (unprocessed.length) {
+        await send(`↩ Returned ${unprocessed.length} unstarted job(s) to pending (tick budget reached).`);
+      }
 
       const st = await portalQueueStats();
       if (signal.aborted) {
