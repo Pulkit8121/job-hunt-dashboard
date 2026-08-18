@@ -20,6 +20,28 @@ import { startRun, finishRun, isRunning } from '@/lib/companyPortalRunState';
 const AUTO_SUBMIT_ATS = ['greenhouse', 'lever', 'ashby'];
 const DISCOVER_ONLY_ATS = ['workday', 'smartrecruiters'];
 
+// Board discovery is a few small JSON fetches per company — network-bound, so
+// it can run far wider than the core count. Measured: 414 boards in 27s at 12.
+const DISCOVER_CONCURRENCY = Number(process.env.PORTAL_DISCOVER_CONCURRENCY) || 12;
+
+// Applying is the opposite: each slot is a live Chrome tab running layout and
+// script for a real application form, so this is bounded by CPU, not network.
+// Default 3 is sized for the 2-vCPU box — enough to keep both cores busy while
+// one tab blocks on navigation, without pushing into swap-and-timeout territory
+// where every job starts failing at once. Raise it only on a bigger machine.
+const APPLY_CONCURRENCY = Number(process.env.PORTAL_APPLY_CONCURRENCY) || 3;
+
+async function mapWithConcurrency(items, limit, fn) {
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i], i).catch(() => {});
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 export async function POST(request) {
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
@@ -92,68 +114,86 @@ export async function POST(request) {
       const appliedEntries = [];
       const skippedEntries = [];
 
-      for (const company of targets) {
-        if (signal.aborted) break;
-
-        let jobs;
+      // ── Phase 1: discover every board in parallel ────────────────────────
+      // Previously discovery and applying were interleaved in one sequential
+      // walk, so a slow board held up applications and a board with nothing
+      // open still cost its full round-trip before the next one started.
+      // Splitting them means the apply pool starts with the whole work-list
+      // and never idles waiting on a fetch.
+      await send(`🔎 Discovering open roles across ${targets.length} board(s)...`);
+      const queue = [];
+      await mapWithConcurrency(targets, DISCOVER_CONCURRENCY, async (company) => {
+        if (signal.aborted) return;
+        let jobs = [];
         try {
           jobs = await discoverAtsJobs(company);
         } catch (e) {
           await send(`⚠ ${company.name}: discovery failed — ${e.message}`);
-          continue;
+          return;
         }
-
         // No eligibility filtering — apply to every posting a tracked company
         // has open, not just ones that look like an exact-level match.
-        if (!jobs.length) continue;
         discovered += jobs.length;
-
         for (const job of jobs) {
-          if (signal.aborted) break;
-
           const linkKey = (job.link || '').split('?')[0];
           if (!linkKey || skippedLinks.has(linkKey) || appliedLinks.has(job.link)) continue;
-
-          await send(`⚡ Applying: ${job.title} at ${company.name} (${company.atsType})...`);
-          // Belt-and-suspenders: applyToPortalJob has its own internal timeouts,
-          // but a single stuck job (e.g. a hung network call inside it) must
-          // never be able to block the rest of this sequential run.
-          const result = await Promise.race([
-            applyToPortalJob(browser, { ...job, companyName: company.name }),
-            new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'job-timed-out' }), 90000)),
-          ]);
-
-          if (result.success) {
-            applied++;
-            appliedLinks.add(job.link);
-            appliedEntries.push({
-              companyId: company.id,
-              companyName: company.name,
-              jobTitle: job.title,
-              jobLink: job.link,
-              source: 'company-portal',
-            });
-            await send(`✓ Applied: ${job.title} at ${company.name} (${result.reason})`);
-          } else {
-            skipped++;
-            skippedLinks.add(linkKey);
-            skippedEntries.push({ link: linkKey, reason: result.reason });
-            const note = result.captcha ? ' — needs manual completion (CAPTCHA)' : '';
-            await send(`○ Skipped: ${job.title} at ${company.name} — ${result.reason}${note}`);
-          }
-
-          if ((appliedEntries.length + skippedEntries.length) >= 10) {
-            if (appliedEntries.length) { await recordApplied(appliedEntries).catch(() => {}); appliedEntries.length = 0; }
-            if (skippedEntries.length) { await recordSkipped(skippedEntries).catch(() => {}); skippedEntries.length = 0; }
-            await send(`💾 Checkpoint: ${applied} applied, ${skipped} skipped so far`);
-          }
-
-          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
+          // Guard against the same posting arriving from two company records
+          // that resolved to the same board slug.
+          if (queue.some(q => q.linkKey === linkKey)) continue;
+          queue.push({ linkKey, job, company });
         }
-      }
+      });
 
-      if (appliedEntries.length) await recordApplied(appliedEntries).catch(() => {});
-      if (skippedEntries.length) await recordSkipped(skippedEntries).catch(() => {});
+      await send(`📋 ${discovered} posting(s) on those boards; ${queue.length} not yet attempted. Applying ${APPLY_CONCURRENCY} at a time...`);
+
+      // ── Phase 2: apply with a bounded pool of concurrent tabs ────────────
+      const flush = async () => {
+        if (appliedEntries.length) { await recordApplied(appliedEntries.splice(0)).catch(() => {}); }
+        if (skippedEntries.length) { await recordSkipped(skippedEntries.splice(0)).catch(() => {}); }
+      };
+
+      await mapWithConcurrency(queue, APPLY_CONCURRENCY, async ({ linkKey, job, company }) => {
+        if (signal.aborted) return;
+
+        await send(`⚡ Applying: ${job.title} at ${company.name} (${company.atsType})...`);
+        // Belt-and-suspenders: applyToPortalJob has its own internal timeouts,
+        // but a single stuck job (e.g. a hung network call inside it) must
+        // never be able to block the whole pool.
+        const result = await Promise.race([
+          applyToPortalJob(browser, { ...job, companyName: company.name }),
+          new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'job-timed-out' }), 120000)),
+        ]);
+
+        if (result.success) {
+          applied++;
+          appliedLinks.add(job.link);
+          appliedEntries.push({
+            companyId: company.id,
+            companyName: company.name,
+            jobTitle: job.title,
+            jobLink: job.link,
+            source: 'company-portal',
+          });
+          await send(`✓ Applied: ${job.title} at ${company.name} (${result.reason})`);
+        } else {
+          skipped++;
+          skippedLinks.add(linkKey);
+          skippedEntries.push({ link: linkKey, reason: result.reason });
+          const note = result.captcha ? ' — needs manual completion (CAPTCHA)' : '';
+          await send(`○ Skipped: ${job.title} at ${company.name} — ${result.reason}${note}`);
+        }
+
+        if (appliedEntries.length + skippedEntries.length >= 20) {
+          await flush();
+          await send(`💾 Checkpoint: ${applied} applied, ${skipped} skipped of ${queue.length}`);
+        }
+
+        // Per-worker jitter. With a pool this staggers the tabs against each
+        // other instead of letting them march in lockstep at the same ATS.
+        await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+      });
+
+      await flush();
 
       if (signal.aborted) {
         await send(`STOPPED: Applied to ${applied} job(s) before stopping. ${skipped} skipped.`);

@@ -103,7 +103,12 @@ async function main() {
   await sleep(1000);
   // Identify + verify each company's ATS board before the portal apply step,
   // preferring Lever/Ashby (no CAPTCHA wall) over Greenhouse.
-  await runSseTask('/api/ats-sweep', { limit: 400 }, 'ats-sweep');
+  // The sweep now rotates least-recently-probed-first and stamps every
+  // company it looks at, so each run advances into new territory instead of
+  // re-probing the same prefix. At ~0.35s/probe with 10-way concurrency, 1200
+  // finishes in about 7 minutes and covers all 5,353 untagged companies in
+  // roughly four days, after which it becomes a slow re-check rotation.
+  await runSseTask('/api/ats-sweep', { limit: Number(process.env.ATS_SWEEP_LIMIT) || 1200 }, 'ats-sweep');
   await sleep(1000);
   await runSseTask('/api/scrape', { companyId: 'all', bust: true }, 'scrape-jobs');
   await sleep(1000);

@@ -51,6 +51,14 @@ const CompanySchema = new mongoose.Schema({
   salaryRange:         String,
   atsType:             { type: String, default: 'naukri' },
   atsSlug:             String,
+  // When this company was last probed for an ATS board. The sweep had no
+  // memory of what it had already looked at — it took `.slice(0, limit)` off
+  // a stably-ordered list, so it re-probed the same first 400 companies every
+  // single day and the remaining 4,953 were never checked once. Ordering by
+  // this field turns the sweep into a rotation that eventually covers
+  // everyone. A 5.3% hit rate measured on a 150-company sample of the
+  // never-probed tail puts roughly 264 undiscovered boards in there.
+  atsCheckedAt:        Date,
   // Email format used org-wide (e.g. 'first.last'), learned from a confirmed
   // address. Companies use one format throughout, so this lets us address
   // anyone whose name we know instead of blind-guessing.
