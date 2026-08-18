@@ -87,6 +87,121 @@ export async function scrapeSmartRecruiters(slug) {
   }
 }
 
+// ── Workable / Recruitee / Breezy / Teamtailor ──────────────────────────────
+// Four more platforms with fully public job APIs whose apply forms were each
+// verified fillable under headless Chrome (real fields, a file input, and a
+// reachable submit). Together they add 8,280 companies to the ~11,900 already
+// covered by Greenhouse/Lever/Ashby.
+//
+// Two platforms were tested and deliberately left as discovery-only, since a
+// driver for them would only manufacture skip records: JazzHR and Personio
+// both render a real form but expose no reachable submit control even after
+// dismissing their consent banner and scrolling — their submit appears to live
+// inside an embedded frame.
+
+export async function scrapeWorkable(slug) {
+  try {
+    const res = await fetch(`https://apply.workable.com/api/v1/widget/accounts/${encodeURIComponent(slug)}?details=true`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.jobs || [])
+      .filter(j => relevant(j.title))
+      .slice(0, 80)
+      .map(j => ({
+        title: j.title,
+        jobId: j.shortcode,
+        // application_url lands directly on the form, skipping a page load.
+        link: j.application_url || `${j.url}/apply`,
+        location: [j.city, j.country].filter(Boolean).join(', ') || (j.telecommuting ? 'Remote' : 'Unknown'),
+        description: '',
+        source: 'careers-page',
+        atsType: 'workable',
+        postedDate: j.published_on || today(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function scrapeRecruitee(slug) {
+  try {
+    const res = await fetch(`https://${encodeURIComponent(slug)}.recruitee.com/api/offers/`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.offers || [])
+      .filter(j => relevant(j.title))
+      .slice(0, 80)
+      .map(j => ({
+        title: j.title,
+        jobId: String(j.id ?? j.slug ?? ''),
+        link: j.careers_apply_url || j.careers_url,
+        location: j.location || [j.city, j.country].filter(Boolean).join(', ') || 'Unknown',
+        description: stripHtml(j.description || '').slice(0, 600),
+        source: 'careers-page',
+        atsType: 'recruitee',
+        postedDate: (j.created_at || '').split(' ')[0] || today(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function scrapeBreezy(slug) {
+  try {
+    const res = await fetch(`https://${encodeURIComponent(slug)}.breezy.hr/json/`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(j => relevant(j.name))
+      .slice(0, 80)
+      .map(j => ({
+        title: j.name,
+        jobId: j.id,
+        link: `${j.url}/apply`,
+        location: [j.location?.city, j.location?.country?.name].filter(Boolean).join(', ') || 'Unknown',
+        description: '',
+        source: 'careers-page',
+        atsType: 'breezy',
+        postedDate: (j.published_date || '').split('T')[0] || today(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function scrapeTeamtailor(slug) {
+  try {
+    // Teamtailor publishes a JSON Feed rather than a bespoke API.
+    const res = await fetch(`https://${encodeURIComponent(slug)}.teamtailor.com/jobs.json`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.items || [])
+      .filter(j => relevant(j.title))
+      .slice(0, 80)
+      .map(j => ({
+        title: j.title,
+        jobId: j.id,
+        link: j.url,
+        location: j.location || 'Unknown',
+        description: stripHtml(j.content_html || '').slice(0, 600),
+        source: 'careers-page',
+        atsType: 'teamtailor',
+        postedDate: (j.date_published || '').split('T')[0] || today(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // ── Workday CXS job-listing API — discovery only, no auto-submit (see
 // company-portal-apply route for why). Workday tenant URLs look like
 // https://{tenant}.wd1.myworkdayjobs.com/{site}, and the same page's own
@@ -143,6 +258,10 @@ const ATS_SIGNATURES = [
   { atsType: 'lever', re: /jobs\.lever\.co\/([a-z0-9_-]+)/i },
   { atsType: 'ashby', re: /jobs\.ashbyhq\.com\/([a-z0-9_-]+)/i },
   { atsType: 'smartrecruiters', re: /jobs\.smartrecruiters\.com\/([A-Za-z0-9_-]+)/i },
+  { atsType: 'workable', re: /apply\.workable\.com\/([a-z0-9_-]+)/i },
+  { atsType: 'recruitee', re: /([a-z0-9_-]+)\.recruitee\.com/i },
+  { atsType: 'breezy', re: /([a-z0-9_-]+)\.breezy\.hr/i },
+  { atsType: 'teamtailor', re: /([a-z0-9_-]+)\.teamtailor\.com/i },
   { atsType: 'workday', re: WORKDAY_URL_RE },
 ];
 
@@ -190,6 +309,10 @@ export async function discoverAtsJobs(company) {
   if (company.atsType === 'smartrecruiters' && company.atsSlug) {
     return scrapeSmartRecruiters(company.atsSlug);
   }
+  if (company.atsType === 'workable' && company.atsSlug) return scrapeWorkable(company.atsSlug);
+  if (company.atsType === 'recruitee' && company.atsSlug) return scrapeRecruitee(company.atsSlug);
+  if (company.atsType === 'breezy' && company.atsSlug) return scrapeBreezy(company.atsSlug);
+  if (company.atsType === 'teamtailor' && company.atsSlug) return scrapeTeamtailor(company.atsSlug);
   if (company.atsType === 'workday' && company.careersUrl) {
     return scrapeWorkdayListings(company.careersUrl);
   }

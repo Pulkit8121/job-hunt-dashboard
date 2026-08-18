@@ -30,6 +30,12 @@ export const DIRECTORY_FILES = {
   greenhouse: 'greenhouse.csv',
   lever: 'lever.csv',
   ashby: 'ashby.csv',
+  // Added after verifying each one's apply form is fillable under headless
+  // Chrome — real fields, a file input, and a reachable submit control.
+  workable: 'workable.csv',
+  recruitee: 'recruitee.csv',
+  breezy: 'breezy.csv',
+  teamtailor: 'teamtailor.csv',
 };
 
 const FETCH_TIMEOUT = 60000;
@@ -169,6 +175,27 @@ const PROBES = {
     if (!r.ok) return null;
     return ((await r.json())?.jobs || []).length;
   },
+  workable: async (slug) => {
+    const r = await fetch(`https://apply.workable.com/api/v1/widget/accounts/${slug}?details=true`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return null;
+    return ((await r.json())?.jobs || []).length;
+  },
+  recruitee: async (slug) => {
+    const r = await fetch(`https://${slug}.recruitee.com/api/offers/`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return null;
+    return ((await r.json())?.offers || []).length;
+  },
+  breezy: async (slug) => {
+    const r = await fetch(`https://${slug}.breezy.hr/json/`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return Array.isArray(d) ? d.length : null;
+  },
+  teamtailor: async (slug) => {
+    const r = await fetch(`https://${slug}.teamtailor.com/jobs.json`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return null;
+    return ((await r.json())?.items || []).length;
+  },
 };
 
 // Returns the board's posting count, or null when it doesn't exist / is empty.
@@ -187,4 +214,12 @@ export const PROBE_CONCURRENCY = {
   greenhouse: Number(process.env.PROBE_CONCURRENCY_GREENHOUSE) || 30,
   lever: Number(process.env.PROBE_CONCURRENCY_LEVER) || 20,
   ashby: Number(process.env.PROBE_CONCURRENCY_ASHBY) || 5,
+  // Workable is the most fragile of the seven. At 20-way the bulk probe marked
+  // 4,014 of 4,268 boards dead; re-probing a sample of those serially showed
+  // 35% of them actually had jobs. The failures were connection drops under
+  // load rather than 429s, so the fix is fewer sockets, not backoff.
+  workable: Number(process.env.PROBE_CONCURRENCY_WORKABLE) || 6,
+  recruitee: Number(process.env.PROBE_CONCURRENCY_RECRUITEE) || 15,
+  breezy: Number(process.env.PROBE_CONCURRENCY_BREEZY) || 15,
+  teamtailor: Number(process.env.PROBE_CONCURRENCY_TEAMTAILOR) || 15,
 };

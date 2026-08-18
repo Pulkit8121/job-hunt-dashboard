@@ -9,6 +9,7 @@ import { answerField } from './application-agent.js';
 import {
   extractComboboxes, openComboboxOptions, chooseComboboxOption,
   findUnfilledRequired, readFieldErrors, findAdvanceControl, clickAdvanceControl,
+  dismissConsentBanner,
 } from './ats-widgets.js';
 
 const RESUME_PATH = process.env.RESUME_PATH || path.join(process.cwd(), 'data', 'resume.pdf');
@@ -338,8 +339,18 @@ export async function applyToPortalJob(browser, job) {
     await page.goto(job.link, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
     await page.waitForSelector('form, input, textarea', { timeout: 10000 }).catch(() => {});
 
+    // A consent overlay sits on top of the form and swallows clicks — measured
+    // on a JazzHR posting where the only reachable controls were "Allow" and
+    // "Reject All" with the whole application form behind them. Declines
+    // (never accepts), which both clears the overlay and is the
+    // privacy-preserving choice.
+    await dismissConsentBanner(page);
+
     // Lever/Ashby posting pages don't carry the form — route to the real apply form.
     await ensureApplyForm(page, job);
+
+    // Some boards only raise the banner once the form route loads.
+    await dismissConsentBanner(page);
 
     // A real, interactive challenge (v2 checkbox, hCaptcha, Turnstile, Cloudflare
     // interstitial) genuinely blocks submission — route it to the manual queue.

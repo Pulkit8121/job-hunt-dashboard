@@ -19,8 +19,16 @@ import { startRun, finishRun, isRunning } from '@/lib/companyPortalRunState';
 // headless Chrome (verified at 5s, 13s and 21s of wait). Listing it as
 // auto-submittable would produce nothing but no-form-fields-found skips.
 // Both are therefore discovered and surfaced, but not applied to.
-const AUTO_SUBMIT_ATS = ['greenhouse', 'lever', 'ashby'];
-const DISCOVER_ONLY_ATS = ['workday', 'smartrecruiters'];
+// Every platform here had its apply form verified fillable under headless
+// Chrome: real fields, a file input, and a reachable submit control.
+const AUTO_SUBMIT_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'recruitee', 'breezy', 'teamtailor'];
+
+// Discovered and surfaced, but never auto-submitted, each for a measured
+// reason: Workday wants a per-tenant account; SmartRecruiters hands off to a
+// oneclick-ui SPA that renders an empty body headlessly; JazzHR and Personio
+// render a real form but expose no reachable submit even after the consent
+// banner is dismissed and the page scrolled.
+const DISCOVER_ONLY_ATS = ['workday', 'smartrecruiters', 'jazzhr', 'personio'];
 
 // Board discovery is a few small JSON fetches per company — network-bound, so
 // it can run far wider than the core count. Measured: 414 boards in 27s at 12.
@@ -108,10 +116,10 @@ export async function POST(request) {
         companies.filter(c => c.atsSlug).map(c => [`${c.atsType}/${c.atsSlug}`, { id: c.id, name: c.name }])
       );
 
-      // Lever and Ashby first: Greenhouse job pages sit behind an invisible
-      // reCAPTCHA that we abort on, so processing them first just spends the
-      // run's time on boards that can't be submitted to anyway.
-      const atsPriority = { lever: 0, ashby: 1, greenhouse: 2 };
+      // Greenhouse last: its job pages sit behind an invisible reCAPTCHA that
+      // we abort on, so spending the run's early time elsewhere is strictly
+      // better. The rest are ordered by how cleanly they submitted in testing.
+      const atsPriority = { lever: 0, ashby: 1, workable: 2, breezy: 3, recruitee: 4, teamtailor: 5, greenhouse: 6 };
       const targets = boards
         .map(b => {
           const known = companyNameBySlug.get(`${b.atsType}/${b.slug}`);
@@ -127,7 +135,7 @@ export async function POST(request) {
 
       const discoverOnlyCount = companies.filter(c => DISCOVER_ONLY_ATS.includes(c.atsType)).length;
 
-      await send(`ℹ ${targets.length} live board(s) from the ATS directory${discoverOnlyCount ? `; ${discoverOnlyCount} Workday/SmartRecruiters companies are discovered but not auto-submitted` : ''}. Apply concurrency ${APPLY_CONCURRENCY} (${os.cpus()?.length || '?'} cores).`);
+      await send(`ℹ ${targets.length} live board(s) across ${AUTO_SUBMIT_ATS.length} ATS platforms${discoverOnlyCount ? `; ${discoverOnlyCount} Workday/SmartRecruiters companies are discovered but not auto-submitted` : ''}. Apply concurrency ${APPLY_CONCURRENCY} (${os.cpus()?.length || '?'} cores).`);
 
       if (!targets.length) {
         await send('DONE: No live ATS boards known yet. Run POST /api/ats-boards/sync first — it ingests the public board directory and probes each board for liveness.');

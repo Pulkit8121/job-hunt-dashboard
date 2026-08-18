@@ -187,39 +187,100 @@ export async function readFieldErrors(page) {
   }).catch(() => []);
 }
 
+// Submit/next button vocabulary, including the non-English wording used by the
+// EU-heavy boards. Measured directly: Recruitee's submit reads "Versturen"
+// (Dutch) and Teamtailor's "Envoyer ma candidature" (French), so an
+// English-only matcher reported no-submit-button-found on forms that were
+// perfectly fillable.
+const SUBMIT_WORDS = [
+  'submit', 'submit application', 'send application', 'apply', 'finish', 'send',
+  'versturen', 'verzenden', 'solliciteer',                       // nl
+  'envoyer', 'envoyer ma candidature', 'postuler', 'soumettre',  // fr
+  'senden', 'bewerbung absenden', 'absenden', 'bewerben',        // de
+  'enviar', 'enviar candidatura', 'postular',                    // es/pt
+  'invia', 'invia candidatura', 'candidati',                     // it
+  'skicka', 'send inn', 'ansok',                                 // sv/no
+];
+const NEXT_WORDS = [
+  'next', 'continue', 'save and continue', 'proceed',
+  'volgende', 'suivant', 'weiter', 'siguiente', 'avanti', 'nasta',
+];
+
+// Consent overlays sit on top of the form and swallow clicks — on a JazzHR
+// posting the only visible enabled buttons were "Allow" and "Reject All",
+// with the entire application form behind them.
+//
+// This ONLY ever clicks a decline/reject control, never an accept one. That is
+// both the privacy-preserving choice and enough to clear the overlay.
+const CONSENT_DECLINE = [
+  'reject all', 'reject', 'decline', 'decline all', 'only necessary',
+  'necessary only', 'essential only', 'refuser', 'refuser les cookies facultatifs',
+  'ablehnen', 'alle ablehnen', 'weigeren', 'rechazar', 'rifiuta',
+];
+const CONSENT_CONTEXT = /cookie|consent|privacy|gdpr|tracking/i;
+
+// Dismisses a cookie/consent banner by DECLINING it. Returns the label it
+// clicked, or null. Never accepts.
+export async function dismissConsentBanner(page) {
+  return page.evaluate((declineWords, contextSrc) => {
+    const context = new RegExp(contextSrc, 'i');
+    const controls = [...document.querySelectorAll('button, input[type="submit"], [role="button"], a')]
+      .filter(b => !b.disabled && b.offsetParent !== null && b.getBoundingClientRect().height > 0);
+
+    for (const el of controls) {
+      const text = (el.textContent || el.value || '').trim().toLowerCase();
+      if (!text || !declineWords.includes(text)) continue;
+      // Only act inside something that actually looks like a consent widget,
+      // so a "Decline" answer *inside the application form* is never clicked.
+      const banner = el.closest('[class*="cookie" i], [class*="consent" i], [id*="cookie" i], [id*="consent" i], [aria-label*="cookie" i], dialog, [role="dialog"]');
+      const looksLikeConsent = banner || context.test(el.closest('div,section,footer')?.textContent?.slice(0, 400) || '');
+      if (!looksLikeConsent) continue;
+      el.click();
+      return text;
+    }
+    return null;
+  }, CONSENT_DECLINE, CONSENT_CONTEXT.source).catch(() => null);
+}
+
 // Advances a multi-step form. Workday, SmartRecruiters, Workable and an
 // increasing share of Greenhouse forms paginate; the old single-pass filler
 // looked for a Submit button on page 1, never found one, and recorded
 // "no-submit-button-found". Returns 'submit' | 'next' | null WITHOUT clicking,
 // so the caller decides.
 export async function findAdvanceControl(page) {
-  return page.evaluate(() => {
+  return page.evaluate((submitWords, nextWords) => {
     const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')]
       .filter(b => !b.disabled && b.offsetParent !== null && b.getBoundingClientRect().height > 0);
-    const textOf = (b) => (b.textContent || b.value || '').trim().toLowerCase();
+    // Strip accents so "Envoyer ma candidature" and "Nasta" match regardless
+    // of how the page spells them.
+    const textOf = (b) => (b.textContent || b.value || '').trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const startsWithAny = (t, words) => words.some(w => t === w || t.startsWith(w + ' '));
 
     // Submit wins over Next when both are present — the last page of a wizard
     // often keeps a disabled-looking Back/Next pair alongside the real submit.
-    const submit = buttons.find(b => /^(submit|submit application|send application|apply|finish)\b/.test(textOf(b)));
+    const submit = buttons.find(b => startsWithAny(textOf(b), submitWords));
     if (submit) return 'submit';
-    const next = buttons.find(b => /^(next|continue|save and continue|proceed)\b/.test(textOf(b)));
+    const next = buttons.find(b => startsWithAny(textOf(b), nextWords));
     if (next) return 'next';
     return null;
-  }).catch(() => null);
+  }, SUBMIT_WORDS, NEXT_WORDS).catch(() => null);
 }
 
 export async function clickAdvanceControl(page, kind) {
-  return page.evaluate((want) => {
+  return page.evaluate((want, submitWords, nextWords) => {
     const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')]
       .filter(b => !b.disabled && b.offsetParent !== null && b.getBoundingClientRect().height > 0);
-    const textOf = (b) => (b.textContent || b.value || '').trim().toLowerCase();
-    const re = want === 'submit'
-      ? /^(submit|submit application|send application|apply|finish)\b/
-      : /^(next|continue|save and continue|proceed)\b/;
-    const btn = buttons.find(b => re.test(textOf(b)));
+    const textOf = (b) => (b.textContent || b.value || '').trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const words = want === 'submit' ? submitWords : nextWords;
+    const btn = buttons.find(b => {
+      const t = textOf(b);
+      return words.some(w => t === w || t.startsWith(w + ' '));
+    });
     if (!btn) return false;
     btn.scrollIntoView({ block: 'center' });
     btn.click();
     return true;
-  }, kind).catch(() => false);
+  }, kind, SUBMIT_WORDS, NEXT_WORDS).catch(() => false);
 }
