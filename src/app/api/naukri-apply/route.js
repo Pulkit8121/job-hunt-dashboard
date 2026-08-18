@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { readCompanies, recordApplied, updateJob, recordSkipped, readActiveSkippedLinks, readNaukriApplyQueue, readAnswerCache, saveAnswer } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
+import { jdApiStatus, resetJdApiState } from '@/lib/naukri-jd-api';
 import { getBrowser, getReusablePage, closeBrowserSafely } from '@/lib/browser';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { startRun, finishRun, isRunning } from '@/lib/naukriRunState';
@@ -154,6 +155,9 @@ export async function POST(request) {
         onResolved: async (entry) => { aiAnswerCount++; await saveAnswer(entry).catch(() => {}); },
       };
       await send(`🧠 Screening-question agent ready (${answerCache.size} cached answer(s)).`);
+      // Per-run, so a session that clears the gate today isn't held back by a
+      // previous run that didn't.
+      resetJdApiState();
 
       for (const job of targets) {
         if (signal.aborted) {
@@ -263,6 +267,13 @@ export async function POST(request) {
 
       if (appliedEntries.length) await recordApplied(appliedEntries);
       if (skippedEntries.length) await recordSkipped(skippedEntries);
+
+      // Say plainly whether the expiry/external-URL pre-flight was usable.
+      // It fails open by design, so without this line an inert pre-flight is
+      // indistinguishable from a working one that found nothing.
+      if (jdApiStatus().disabled) {
+        await send('ℹ Naukri gated its job-detail API behind reCAPTCHA this run — expiry pre-flight and company-URL recovery were unavailable, so both fell back to the page-driven path.');
+      }
       if (signal.aborted) {
         await send(`STOPPED: Applied to ${applied} jobs before stopping. ${failed} skipped/saved.`);
       } else if (reachedQuota) {
