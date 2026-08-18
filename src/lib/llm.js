@@ -62,7 +62,14 @@ export function listOpenAIKeys() {
     };
   });
 }
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+// 'gemini-2.0-flash' was the previous default and is now retired — it 404s,
+// which silently disabled Gemini entirely and left OpenAI with no fallback.
+// That is the exact failure this module's header describes, recurring one
+// model generation later. The floating 'gemini-flash-latest' alias is used
+// instead of a pinned version precisely so the next retirement can't repeat
+// it; verified working against the live key, whereas the pinned
+// 'gemini-2.5-flash' was not available to it.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
 // provider -> reason string, once it's known to be unusable this run
 const dead = new Map();
