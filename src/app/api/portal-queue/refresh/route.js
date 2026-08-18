@@ -32,7 +32,15 @@ async function mapWithConcurrency(items, limit, fn) {
 // every platform proportionally instead of exhausting the oldest one first.
 export async function POST(request) {
   const {
-    boardLimit = Number(process.env.QUEUE_REFRESH_BOARD_LIMIT) || 20000,
+    // Bounded by default. Found the production queue completely drained (0
+    // pending) while applies were still running, i.e. the drainer worked but
+    // the refill never completed — an unbounded sweep of all 13,385 boards
+    // takes ~11.6 minutes and the SSE client gives up first, so nothing was
+    // ever committed. 4,000 boards measured at 4.6 minutes and yielded 2,959
+    // queued jobs, which is many ticks' worth. Because readLiveBoards
+    // interleaves platforms and orders by probe age, successive capped runs
+    // still rotate across the whole set.
+    boardLimit = Number(process.env.QUEUE_REFRESH_BOARD_LIMIT) || 4000,
   } = await request.json().catch(() => ({}));
 
   const encoder = new TextEncoder();
