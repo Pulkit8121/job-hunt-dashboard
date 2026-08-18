@@ -186,6 +186,29 @@ function normalizePhoneForField(value) {
   return value.replace(/[^\d+]/g, '');
 }
 
+// Intl phone widgets (intl-tel-input and friends) attach keyboard handlers and
+// ignore a programmatic value write — the native setter fires an input event
+// but the widget's own formatter never runs, so the field keeps the country
+// prefix it defaulted to. Measured twice: a Greenhouse field kept "+246" and a
+// Dutch Recruitee field kept "+31" while our number was discarded. Typing the
+// digits as real key events is what those widgets actually listen for.
+async function typeTextField(page, refId, value) {
+  const handle = await page.$(`[data-agent-ref="${refId}"]`);
+  if (!handle) return false;
+  try {
+    await handle.scrollIntoView().catch(() => {});
+    await handle.click({ clickCount: 3 }).catch(() => {});   // select existing content
+    await page.keyboard.press('Backspace').catch(() => {});
+    await handle.type(value, { delay: 12 });
+    await handle.evaluate(el => el.dispatchEvent(new Event('change', { bubbles: true }))).catch(() => {});
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await handle.dispose();
+  }
+}
+
 async function fillTextField(page, refId, value) {
   await page.evaluate((ref, val) => {
     const el = document.querySelector(`[data-agent-ref="${ref}"]`);
@@ -353,7 +376,14 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
     const answer = await answerField({ label: field.label, kind: field.kind }, job);
     if (answer) {
       const isPhone = /phone|mobile|telefon|téléphone|telefoon/i.test(field.label);
-      await fillTextField(page, field.refId, isPhone ? normalizePhoneForField(answer) : answer).catch(() => {});
+      if (isPhone) {
+        const digits = normalizePhoneForField(answer);
+        // Real typing first; fall back to the setter if the field refuses it.
+        const typed = await typeTextField(page, field.refId, digits).catch(() => false);
+        if (!typed) await fillTextField(page, field.refId, digits).catch(() => {});
+      } else {
+        await fillTextField(page, field.refId, answer).catch(() => {});
+      }
       filled++;
     }
   }
@@ -364,7 +394,9 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
     if (!wanted(combo.refId)) continue;
     const options = await openComboboxOptions(page, combo.refId);
     if (!options.length) continue;
-    const answer = await answerField({ label: combo.label, kind: 'choice', options }, job);
+    // Forward `required` so an unrecognised but mandatory dropdown falls back
+    // to a safe option instead of being left blank and bouncing the form.
+    const answer = await answerField({ label: combo.label, kind: 'choice', options, required: combo.required }, job);
     if (!answer) {
       await page.keyboard.press('Escape').catch(() => {});
       continue;

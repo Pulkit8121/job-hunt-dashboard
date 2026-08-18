@@ -44,6 +44,7 @@ const FIELD_RULES = [
   { test: /how did you hear|referr(?:al|er)|source/i, value: () => 'Company careers page', kind: 'text' },
   { test: /veteran/i, value: () => PROFILE.eeo.veteranStatus, kind: 'choice' },
   { test: /disab(?:led|ility)/i, value: () => PROFILE.eeo.disabilityStatus, kind: 'choice' },
+  { test: /hispanic|latino|latinx/i, value: () => 'No', kind: 'choice' },
   { test: /race|ethnicity/i, value: () => PROFILE.eeo.ethnicity, kind: 'choice' },
   { test: /gender|sex\b/i, value: () => PROFILE.eeo.gender, kind: 'choice' },
   { test: /pronoun/i, value: () => 'He/Him', kind: 'choice' },
@@ -78,6 +79,10 @@ const FIELD_RULES = [
   { test: /i (?:hereby )?(?:certify|agree|authorize|acknowledge|understand)|applicant.s certification/i, value: () => 'Yes', kind: 'choice' },
   { test: /graduation (?:completion )?year|year of graduation/i, value: () => '2021', kind: 'text' },
   { test: /highest (?:level of )?education|education status|degree/i, value: () => "Bachelor's Degree", kind: 'text' },
+  // Commute questions are the same decision as relocation for this profile,
+  // which is open to any city — answering them separately kept a required
+  // Greenhouse dropdown blank and bounced the form.
+  { test: /able to commute|commute to (?:this|the) (?:job|office|location)|willing to commute/i, value: () => 'Yes', kind: 'choice' },
   { test: /relocat/i, value: () => 'Yes', kind: 'choice' },
   { test: /remote/i, value: () => 'Yes', kind: 'choice' },
 ];
@@ -161,6 +166,19 @@ Reply with ONLY the answer text (2-4 sentences, first person, no preamble, no ma
   return text;
 }
 
+// A country dial-code selector, recognised by its options rather than its
+// label. Greenhouse labels it simply "Phone", so the /phone/ rule fed it the
+// full phone number, which matches none of its 60 country entries — leaving a
+// required control unanswered and the form unsubmittable. The widget then
+// defaults to whatever country it likes, which is how an Indian number
+// rendered as "+246" (British Indian Ocean Territory).
+const DIAL_CODE_RE = /\+\d{1,4}\s*$/;
+export function looksLikeDialCodeOptions(options = []) {
+  if (options.length < 10) return false;
+  const hits = options.filter(o => DIAL_CODE_RE.test(o.trim())).length;
+  return hits / options.length > 0.6;
+}
+
 // A required choice we can't interpret still has to be answered or the form
 // won't submit — measured on Breezy, where 13 required radio groups were left
 // blank because their labels came through as "section_1666121249877_ques…".
@@ -182,6 +200,16 @@ export function safeRequiredChoice(options = []) {
 // Returns a string answer, or null to leave the field untouched.
 export async function answerField(field, job) {
   const label = field.label || '';
+
+  // Checked before the label rules: the label on these is often just "Phone",
+  // which would otherwise match the phone-number rule.
+  if (field.kind === 'choice' && looksLikeDialCodeOptions(field.options)) {
+    const dial = (PROFILE.phone.match(/^\+(\d{1,3})/) || [])[1];
+    const country = /india/i;
+    return field.options.find(o => country.test(o) && (!dial || o.includes(`+${dial}`)))
+        || field.options.find(o => country.test(o))
+        || null;
+  }
 
   for (const rule of FIELD_RULES) {
     if (!rule.test.test(label)) continue;

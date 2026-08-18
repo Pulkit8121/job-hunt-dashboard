@@ -63,9 +63,23 @@ export async function extractComboboxes(page, startIndex = 0) {
         refId: ref,
         label: labelFor(el) || labelFor(anchor),
         kind: 'combobox',
+        // react-select puts the required attribute on a hidden proxy input
+        // beside the control, not on the combobox itself — so checking only
+        // aria-required reported every Greenhouse dropdown as optional and the
+        // required-choice fallback never ran.
         required: anchor.getAttribute('aria-required') === 'true'
           || el.getAttribute('aria-required') === 'true'
-          || !!anchor.closest('[class*="required" i]'),
+          || !!anchor.closest('[class*="required" i]')
+          // The proxy lives in the select *container*, which is not the
+          // control's immediate parent — measured one hop further up, so a
+          // single-level lookup found nothing and reported every Greenhouse
+          // dropdown optional. Walk up a bounded number of levels instead.
+          || (() => {
+            for (let n = anchor, hops = 0; n && hops < 4; n = n.parentElement, hops++) {
+              if (n.querySelector('input[required][aria-hidden="true"], input[required][tabindex="-1"]')) return true;
+            }
+            return false;
+          })(),
       });
     }
     return out;
@@ -314,9 +328,70 @@ export async function auditFilledForm(page, { profileValues = [] } = {}) {
       return (el.name || '').trim();
     };
 
-    const controls = [...document.querySelectorAll('input, select, textarea')]
-      .filter(el => !el.disabled && !el.readOnly && isVisible(el)
+    // react-select renders a visually-hidden proxy input purely to carry
+    // HTML5 required-validation on behalf of its combobox:
+    //   <input required tabindex="-1" aria-hidden="true" class="…requiredInput">
+    // It is not typeable and fills itself when the combobox is answered.
+    // Reporting it directly produced a permanently unresolvable
+    // "required-empty" with no label. Its emptiness is still a real signal —
+    // it means the *combobox* is unanswered — so it is re-attributed below
+    // rather than ignored.
+    const isValidationProxy = (el) =>
+      el.getAttribute('aria-hidden') === 'true' || el.tabIndex === -1;
+
+    const all = [...document.querySelectorAll('input, select, textarea')]
+      .filter(el => !el.disabled && !el.readOnly
         && !['hidden', 'submit', 'button', 'image'].includes(el.type));
+
+    // Text that is decoration, not a question. Workable's label walk otherwise
+    // returned "SVGs not supported by this browser." — an <svg> fallback node.
+    const JUNK_LABEL = /svgs? not supported|^\s*$|^select\.{0,3}$|^loading/i;
+
+    for (const el of all) {
+      if (!isValidationProxy(el)) continue;
+      const required = el.required || el.getAttribute('aria-required') === 'true';
+      if (!required || (el.value || '').trim()) continue;
+
+      // The proxy can lag its own combobox: Workable leaves it empty even
+      // after a selection is made. Reporting that produces a problem the
+      // repair loop can never resolve, so check the visible control first and
+      // treat a combobox that clearly shows a selection as answered.
+      const shell = el.closest('[class*="select" i], [class*="field" i]') || el.parentElement;
+      // Class naming differs per ATS (react-select uses select__single-value,
+      // Workable uses hashed module classes), so fall back to the control's
+      // own rendered text minus the placeholder.
+      const combo0 = shell?.querySelector('[role="combobox"], [class*="control" i]');
+      const shown = (shell?.querySelector('[class*="singleValue" i], [class*="select__single-value" i]')?.textContent
+        || combo0?.getAttribute('aria-label')
+        || (combo0?.textContent || '').trim()
+        || '').trim();
+      if (shown && !/^select\.{0,3}$/i.test(shown)) continue;
+      // Name the combobox this proxy belongs to, so the report points at
+      // something answerable.
+      const host = el.closest('[class*="select" i], [class*="field" i], [class*="question" i]') || el.parentElement;
+      const combo = host?.querySelector('[role="combobox"], [class*="select__control" i]');
+      // The visible label usually sits OUTSIDE the react-select container, so
+      // walk up until a container that actually carries one.
+      let labelNode = null;
+      for (let n = el.parentElement, hops = 0; n && hops < 6; n = n.parentElement, hops++) {
+        labelNode = n.querySelector(':scope > label, :scope > legend, :scope label');
+        if (labelNode?.textContent?.trim()) break;
+        labelNode = null;
+      }
+      let label = (labelNode?.textContent || '').trim();
+      if (JUNK_LABEL.test(label)) label = '';
+      label = label
+        || (combo?.getAttribute('aria-label') || '').trim()
+        || (shell?.getAttribute('aria-label') || '').trim();
+      problems.push({
+        ref: combo?.getAttribute('data-agent-ref') || null,
+        label: label || '(unlabelled dropdown)',
+        kind: 'required-choice-empty',
+        detail: 'combobox not answered (react-select required proxy is empty)',
+      });
+    }
+
+    const controls = all.filter(el => isVisible(el) && !isValidationProxy(el));
 
     let filled = 0;
     const textValues = new Map(); // value -> [labels] for duplicate detection
