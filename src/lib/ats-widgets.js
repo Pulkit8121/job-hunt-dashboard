@@ -349,12 +349,15 @@ export async function clickAdvanceControl(page, kind) {
 
     if (await isTopmost()) {
       await handle.click({ delay: 30 });
-    } else {
-      // Still covered — a trusted click is impossible, so dispatch one at the
-      // element directly rather than clicking whatever is on top of it.
-      await handle.evaluate(el => el.click());
+      return true;
     }
-    return true;
+
+    // Still covered. A synthetic el.click() is NOT an acceptable fallback
+    // here: it carries isTrusted:false, Ashby ignores it for submission, and
+    // reporting success on it is how a covered button produced "clicked=true"
+    // with no submit mutation at all. Report the failure instead so the caller
+    // can surface it rather than recording a phantom submission.
+    return false;
   } catch {
     // Covered or detached — fall back to the synthetic click rather than
     // losing the attempt entirely.

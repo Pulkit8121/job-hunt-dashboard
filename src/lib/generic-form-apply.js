@@ -669,6 +669,21 @@ async function fillAndVerify(page, job, { onNote = () => {} } = {}) {
     if (audit.problems.length >= before) break;
   }
 
+  // Close anything still open before the caller tries to submit.
+  //
+  // Filling and the phone-country repair both open combobox menus, and an
+  // open menu overlays the submit button. Ashby then reported a successful
+  // click with no submit mutation, because the click was landing on the menu.
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => {
+    document.activeElement?.blur?.();
+    // Click a neutral spot, not document.body — clicking body can re-trigger
+    // widgets that listen on it.
+    document.querySelector('h1, header, main')?.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true }));
+  }).catch(() => {});
+  await new Promise(r => setTimeout(r, 300));
+
   return { filledCount, audit };
 }
 
