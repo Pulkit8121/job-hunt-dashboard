@@ -996,11 +996,42 @@ export async function readUnprobedBoards({ limit = 5000, staleDays = null } = {}
 
 // The apply queue's board source: confirmed-live boards that actually had
 // postings when last probed.
-export async function readLiveBoards({ atsTypes = null, limit = 20000 } = {}) {
+export async function readLiveBoards({ atsTypes = null, limit = 20000, interleave = true } = {}) {
   await connectDB();
   const filter = { alive: true, jobCount: { $gt: 0 } };
   if (atsTypes) filter.atsType = { $in: atsTypes };
-  return AtsBoard.find(filter, 'atsType slug name jobCount').sort({ lastProbedAt: 1 }).limit(limit).lean();
+  const boards = await AtsBoard.find(filter, 'atsType slug name jobCount')
+    .sort({ lastProbedAt: 1 }).limit(limit).lean();
+
+  if (!interleave) return boards;
+
+  // Round-robin across platforms instead of returning them in strict
+  // lastProbedAt order.
+  //
+  // Sorting purely by probe age silently starved every newly-added platform:
+  // Workable, Recruitee, Breezy and Teamtailor were probed last, so they
+  // occupied positions 9,936+ of 13,385 and any sweep that didn't run to
+  // completion never reached them. Confirmed in production — after 460 applies
+  // the queue contained zero rows from all four, so the platforms added to
+  // widen coverage were contributing nothing.
+  //
+  // Interleaving keeps the oldest-first rotation *within* each platform while
+  // guaranteeing every platform is represented from the first board onward.
+  const byType = new Map();
+  for (const b of boards) {
+    if (!byType.has(b.atsType)) byType.set(b.atsType, []);
+    byType.get(b.atsType).push(b);
+  }
+  const queues = [...byType.values()];
+  const out = [];
+  for (let i = 0; out.length < boards.length; i++) {
+    let progressed = false;
+    for (const q of queues) {
+      if (i < q.length) { out.push(q[i]); progressed = true; }
+    }
+    if (!progressed) break;
+  }
+  return out;
 }
 
 export async function atsBoardStats() {

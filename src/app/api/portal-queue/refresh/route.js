@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 import { readLiveBoards, readCompanies, readApplied, readActiveSkippedLinks, upsertPortalJobs, portalQueueStats, releaseStalePortalJobs } from '@/lib/db';
 import { discoverAtsJobs } from '@/lib/company-portal-discovery';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
+import { startRun, finishRun, isRunning } from '@/lib/portalQueueRunState';
 
 const AUTO_SUBMIT_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'recruitee', 'breezy', 'teamtailor'];
 const DISCOVER_CONCURRENCY = Number(process.env.PORTAL_DISCOVER_CONCURRENCY) || 12;
@@ -26,9 +27,9 @@ async function mapWithConcurrency(items, limit, fn) {
 // minutes — which is fine on a 4-hourly cadence but was ruinous when the apply
 // route paid it on every tick before submitting anything.
 //
-// Boards are swept least-recently-probed first (readLiveBoards already sorts
-// that way), so a run capped by `boardLimit` still rotates through the whole
-// set across successive runs rather than re-sweeping the same prefix.
+// readLiveBoards interleaves platforms round-robin while keeping each
+// platform's own oldest-first rotation, so a run capped by `boardLimit` covers
+// every platform proportionally instead of exhausting the oldest one first.
 export async function POST(request) {
   const {
     boardLimit = Number(process.env.QUEUE_REFRESH_BOARD_LIMIT) || 20000,
@@ -38,6 +39,20 @@ export async function POST(request) {
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
   const send = (m) => writer.write(encoder.encode(`data: ${JSON.stringify({ message: m })}\n\n`)).catch(() => {});
+
+  // A full sweep takes ~11.6 minutes but the apply tick runs every 10, so
+  // without this two sweeps overlap — doubling load on every ATS API and on a
+  // box that is simultaneously running a dozen Chrome tabs.
+  if (isRunning()) {
+    await send('⚠ A queue refresh is already running. Skipping this trigger.');
+    await writer.close().catch(() => {});
+    return new Response(stream.readable, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+    });
+  }
+  const controller = startRun();
+  const signal = controller.signal;
+  request.signal?.addEventListener?.('abort', () => controller.abort());
 
   (async () => {
     try {
@@ -68,6 +83,7 @@ export async function POST(request) {
       };
 
       await mapWithConcurrency(boards, DISCOVER_CONCURRENCY, async (b) => {
+        if (signal.aborted) return;
         const known = nameBySlug.get(`${b.atsType}/${b.slug}`);
         const companyName = known?.name || b.name || b.slug;
         if (isExcludedCompany(companyName, excluded)) return;
@@ -103,6 +119,7 @@ export async function POST(request) {
     } catch (e) {
       await send(`FATAL: ${e.message}`);
     } finally {
+      finishRun();
       await writer.close().catch(() => {});
     }
   })();
