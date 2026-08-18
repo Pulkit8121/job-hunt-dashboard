@@ -102,6 +102,86 @@ const NON_INDIA_LOCATION_PATTERNS = [
   /\bsaudi\b/,
 ];
 
+// ── Broad role matching (company-portal / high-volume mode) ─────────────────
+//
+// PROFILE.roleKeywords is a deliberately narrow backend/full-stack list. Across
+// a 2,060-posting corpus pulled from live Greenhouse boards it matched 6.7% of
+// titles, which caps portal volume far below the 2k/day target.
+//
+// Naively widening to bare "engineer"/"developer" raises the hit rate but
+// wrecks precision: the same corpus then matched "Plasma Dry Etch Engineer",
+// "Dielectric and Polymer Materials Engineer" and "Photo Process Engineer" —
+// semiconductor fab roles with nothing to do with software.
+//
+// So a generic job word only counts when a software signal appears alongside
+// it, and an explicit non-software domain list vetoes regardless.
+const SOFTWARE_ROLE_PHRASES = [
+  'software engineer', 'software developer', 'software development engineer',
+  'backend engineer', 'backend developer', 'back end engineer', 'back-end developer',
+  'frontend engineer', 'frontend developer', 'front end engineer', 'front-end developer',
+  'full stack engineer', 'full stack developer', 'fullstack engineer', 'fullstack developer',
+  'full-stack engineer', 'full-stack developer',
+  'web developer', 'application developer', 'applications engineer',
+  'platform engineer', 'infrastructure engineer', 'systems engineer',
+  'devops engineer', 'site reliability engineer', 'sre',
+  'data engineer', 'machine learning engineer', 'ml engineer', 'ai engineer', 'mlops engineer',
+  'mobile engineer', 'mobile developer', 'android developer', 'android engineer',
+  'ios developer', 'ios engineer', 'game developer',
+  'security engineer', 'application security engineer', 'cloud engineer',
+  'integration engineer', 'solutions engineer', 'support engineer', 'sdet',
+  'automation engineer', 'test automation engineer', 'qa automation engineer',
+  'sde', 'swe', 'programmer', 'api engineer', 'api developer',
+];
+
+// Technology tokens that turn a generic "Engineer"/"Developer" into a
+// software role. Kept to things that only appear in software postings.
+const SOFTWARE_SIGNALS = [
+  'react', 'angular', 'vue', 'svelte', 'node', 'nodejs', 'node.js', 'django', 'flask',
+  'fastapi', 'rails', 'laravel', 'spring boot', 'dotnet', '.net', 'c#', 'golang', 'rust',
+  'kotlin', 'scala', 'typescript', 'javascript', 'python', 'java', 'ruby', 'php', 'elixir',
+  'graphql', 'rest', 'api', 'apis', 'microservices', 'kubernetes', 'docker', 'terraform',
+  'aws', 'gcp', 'azure', 'cloud', 'backend', 'frontend', 'full stack', 'fullstack',
+  'full-stack', 'web', 'mobile', 'android', 'ios', 'data', 'machine learning', 'ml', 'ai',
+  'llm', 'platform', 'infrastructure', 'devops', 'database', 'distributed systems',
+];
+const GENERIC_JOB_WORDS = ['engineer', 'developer', 'development', 'programmer', 'engineering'];
+
+// Domains that are emphatically not software, however the title is phrased.
+const NON_SOFTWARE_DOMAINS = [
+  'mechanical', 'electrical', 'chemical', 'civil', 'industrial', 'structural', 'materials',
+  'manufacturing', 'process engineer', 'process integration', 'plasma', 'etch', 'lithography',
+  'photolithography', 'semiconductor', 'wafer', 'polymer', 'dielectric', 'thermal', 'optical',
+  'hardware', 'firmware', 'rf ', 'antenna', 'automotive', 'aerospace', 'petroleum', 'mining',
+  'biomedical', 'clinical', 'environmental', 'geotechnical', 'metallurg', 'packaging',
+  'field engineer', 'sales engineer', 'solutions architect', 'network engineer', 'facilities',
+  'validation engineer', 'quality engineer', 'safety', 'nurse', 'technician', 'machinist',
+];
+
+const SOFTWARE_ROLE_PATTERNS   = SOFTWARE_ROLE_PHRASES.map(keywordRegex);
+const SOFTWARE_SIGNAL_PATTERNS = SOFTWARE_SIGNALS.map(keywordRegex);
+const GENERIC_JOB_PATTERNS     = GENERIC_JOB_WORDS.map(keywordRegex);
+const NON_SOFTWARE_PATTERNS    = NON_SOFTWARE_DOMAINS.map(d => keywordRegex(d.trim()));
+
+// Wider net than isRelevantJob, for the company-portal flow where the goal is
+// volume across many role families rather than an exact backend match.
+//
+// Seniority is filtered by default via the existing isEligibleTitle policy.
+// Without it the broad net pulls in "Senior Java Developer", "Senior Machine
+// Learning Engineer" and "Associate Director, AI/ML Engineering" — measured on
+// the live corpus — which are a poor use of an application slot at ~2 years of
+// experience. Pass { includeSenior: true } (or set PORTAL_INCLUDE_SENIOR=true)
+// to trade that precision for raw volume.
+export function isRelevantJobBroad(title = '', { includeSenior = process.env.PORTAL_INCLUDE_SENIOR === 'true' } = {}) {
+  const t = title.toLowerCase();
+  if (NON_SOFTWARE_PATTERNS.some(re => re.test(t))) return false;
+  if (EXCLUDE_ROLE_PATTERNS.some(re => re.test(t))) return false;
+  if (!includeSenior && !isEligibleTitle(title)) return false;
+  if (SOFTWARE_ROLE_PATTERNS.some(re => re.test(t))) return true;
+  // Generic job word alone is not enough — it needs a software signal with it.
+  const generic = GENERIC_JOB_PATTERNS.some(re => re.test(t));
+  return generic && SOFTWARE_SIGNAL_PATTERNS.some(re => re.test(t));
+}
+
 export function isRelevantJob(title = '') {
   const t = title.toLowerCase();
   const hasTarget = TARGET_ROLE_PATTERNS.some(re => re.test(t));

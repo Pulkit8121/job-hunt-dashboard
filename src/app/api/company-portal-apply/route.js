@@ -1,7 +1,9 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { readCompanies, recordApplied, recordSkipped, readActiveSkippedLinks, readApplied } from '@/lib/db';
+import os from 'os';
+
+import { readCompanies, recordApplied, recordSkipped, readActiveSkippedLinks, readApplied, readLiveBoards } from '@/lib/db';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { discoverAtsJobs } from '@/lib/company-portal-discovery';
 import { applyToPortalJob } from '@/lib/generic-form-apply';
@@ -29,7 +31,16 @@ const DISCOVER_CONCURRENCY = Number(process.env.PORTAL_DISCOVER_CONCURRENCY) || 
 // Default 3 is sized for the 2-vCPU box — enough to keep both cores busy while
 // one tab blocks on navigation, without pushing into swap-and-timeout territory
 // where every job starts failing at once. Raise it only on a bigger machine.
-const APPLY_CONCURRENCY = Number(process.env.PORTAL_APPLY_CONCURRENCY) || 3;
+// Auto-sized from the host's actual core count so a server upgrade takes
+// effect without editing config, while PORTAL_APPLY_CONCURRENCY still wins
+// when set. Reserve one core for Node/Mongo, then two apply tabs per remaining
+// core — a tab spends most of its life blocked on navigation, not computing.
+// Capped at 16: past that the bottleneck stops being CPU and becomes the ATS.
+function autoConcurrency() {
+  const cores = os.cpus()?.length || 2;
+  return Math.max(2, Math.min(16, (cores - 1) * 2));
+}
+const APPLY_CONCURRENCY = Number(process.env.PORTAL_APPLY_CONCURRENCY) || autoConcurrency();
 
 async function mapWithConcurrency(items, limit, fn) {
   let next = 0;
@@ -86,19 +97,40 @@ export async function POST(request) {
       // is exactly why runs looked "stopped": they were still stuck discovering,
       // never got to applying before the request timed out.
 
+      // Boards come from the ATS directory (see lib/ats-directory.js), not from
+      // the company list. Deriving boards from tracked companies yielded 414;
+      // enumerating the ATS universe directly and probing for liveness yields
+      // 9,936, and 95% of those were boards the company-driven path had never
+      // seen. Company records are still consulted so per-company exclusions
+      // keep working, but they no longer bound the universe.
+      const boards = await readLiveBoards({ atsTypes: AUTO_SUBMIT_ATS });
+      const companyNameBySlug = new Map(
+        companies.filter(c => c.atsSlug).map(c => [`${c.atsType}/${c.atsSlug}`, { id: c.id, name: c.name }])
+      );
+
       // Lever and Ashby first: Greenhouse job pages sit behind an invisible
       // reCAPTCHA that we abort on, so processing them first just spends the
-      // run's time on companies that can't be submitted to anyway.
+      // run's time on boards that can't be submitted to anyway.
       const atsPriority = { lever: 0, ashby: 1, greenhouse: 2 };
-      const targets = companies
-        .filter(c => AUTO_SUBMIT_ATS.includes(c.atsType) && c.atsSlug && !isExcludedCompany(c.name, excluded))
+      const targets = boards
+        .map(b => {
+          const known = companyNameBySlug.get(`${b.atsType}/${b.slug}`);
+          return {
+            id: known?.id || `${b.atsType}-${b.slug}`,
+            name: known?.name || b.name || b.slug,
+            atsType: b.atsType,
+            atsSlug: b.slug,
+          };
+        })
+        .filter(c => !isExcludedCompany(c.name, excluded))
         .sort((a, b) => (atsPriority[a.atsType] ?? 9) - (atsPriority[b.atsType] ?? 9));
+
       const discoverOnlyCount = companies.filter(c => DISCOVER_ONLY_ATS.includes(c.atsType)).length;
 
-      await send(`ℹ ${targets.length} companies on Greenhouse/Lever/Ashby to scan (of ${companies.length} tracked)${discoverOnlyCount ? `; ${discoverOnlyCount} Workday/SmartRecruiters companies are discovered but not auto-submitted` : ''}.`);
+      await send(`ℹ ${targets.length} live board(s) from the ATS directory${discoverOnlyCount ? `; ${discoverOnlyCount} Workday/SmartRecruiters companies are discovered but not auto-submitted` : ''}. Apply concurrency ${APPLY_CONCURRENCY} (${os.cpus()?.length || '?'} cores).`);
 
-      if (!targets.length && !discoverOnlyCount) {
-        await send('DONE: No ATS-hosted companies found yet. Tag companies with an atsType + atsSlug (Add Company modal), or set a careersUrl so ATS auto-detection can find one.');
+      if (!targets.length) {
+        await send('DONE: No live ATS boards known yet. Run POST /api/ats-boards/sync first — it ingests the public board directory and probes each board for liveness.');
         return;
       }
 

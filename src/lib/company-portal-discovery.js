@@ -3,7 +3,14 @@
 // Ashby and Workday are new here since neither the Naukri-focused pipeline nor
 // scraper.js supported them before.
 import { scrapeGreenhouse, scrapeLever } from './scraper.js';
-import { isRelevantJob } from './matcher.js';
+import { isRelevantJob, isRelevantJobBroad } from './matcher.js';
+
+// The company-portal flow is the volume channel, so it uses the broad role
+// matcher by default: measured on 2,060 live Greenhouse postings, the narrow
+// PROFILE.roleKeywords list matched 6.7% of titles, which caps throughput far
+// below target. Set PORTAL_BROAD_ROLES=false to fall back to the narrow list.
+const relevant = (title) =>
+  process.env.PORTAL_BROAD_ROLES === 'false' ? isRelevantJob(title) : isRelevantJobBroad(title);
 
 const FETCH_TIMEOUT = 15000;
 
@@ -24,7 +31,7 @@ export async function scrapeAshby(slug) {
     if (!res.ok) return [];
     const data = await res.json();
     return (data.jobs || [])
-      .filter(j => isRelevantJob(j.title))
+      .filter(j => relevant(j.title))
       .slice(0, 80)
       .map(j => ({
         title: j.title,
@@ -59,7 +66,7 @@ export async function scrapeSmartRecruiters(slug) {
     if (!res.ok) return [];
     const data = await res.json();
     return (data.content || [])
-      .filter(j => isRelevantJob(j.name))
+      .filter(j => relevant(j.name))
       .slice(0, 80)
       .map(j => ({
         title: j.name,
@@ -109,7 +116,7 @@ export async function scrapeWorkdayListings(careersUrl) {
     if (!res.ok) return [];
     const data = await res.json();
     return (data.jobPostings || [])
-      .filter(j => isRelevantJob(j.title))
+      .filter(j => relevant(j.title))
       .map(j => ({
         title: j.title,
         jobId: j.bulletFields?.[0] || j.externalPath,

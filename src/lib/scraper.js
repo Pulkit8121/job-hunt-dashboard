@@ -1,4 +1,10 @@
-import { filterEligibleJobs, isRelevantJob } from './matcher.js';
+import { filterEligibleJobs, isRelevantJob, isRelevantJobBroad } from './matcher.js';
+
+// Greenhouse/Lever fetchers are shared by the company-portal apply flow, which
+// needs the wider role net — see company-portal-discovery.js for the measured
+// reasoning. PORTAL_BROAD_ROLES=false restores the narrow behaviour.
+const relevant = (title) =>
+  process.env.PORTAL_BROAD_ROLES === 'false' ? isRelevantJob(title) : isRelevantJobBroad(title);
 import { analyzeJob } from './ai.js';
 import { buildNaukriRoleSearchUrl, buildNaukriSearchUrl, SCRAPE_ROLE_SEARCHES } from './company-utils.js';
 import { extractNaukriCards, openNaukriPage, resolveNaukriJobDetail } from './naukri.js';
@@ -32,7 +38,7 @@ export async function scrapeGreenhouse(slug) {
     if (!res.ok) return [];
     const data = await res.json();
     return (data.jobs || [])
-      .filter(j => isRelevantJob(j.title))
+      .filter(j => relevant(j.title))
       .slice(0, 80)
       .map(j => ({
         title: j.title,
@@ -58,7 +64,7 @@ export async function scrapeLever(slug) {
     if (!res.ok) return [];
     const data = await res.json();
     return (Array.isArray(data) ? data : [])
-      .filter(j => isRelevantJob(j.text))
+      .filter(j => relevant(j.text))
       .slice(0, 80)
       .map(j => ({
         title: j.text,

@@ -15,6 +15,53 @@ const ORDER = (process.env.LLM_PROVIDER_ORDER || 'openai,gemini')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+// Two OpenAI keys can be configured, selectable at runtime from the dashboard.
+// The point is spend control and blast radius: high-volume applying burns
+// through per-key rate limits and billing, and a key that gets rotated or
+// throttled shouldn't take the whole pipeline down — switch to the other one
+// from the UI instead of editing .env and restarting.
+//
+// setActiveOpenAIKey() is called by the settings route at request time; the
+// env var is only the boot default.
+const OPENAI_KEYS = {
+  1: () => process.env.OPENAI_API_KEY,
+  2: () => process.env.OPENAI_API_KEY_2,
+};
+let activeOpenAIKey = ['1', '2'].includes(String(process.env.OPENAI_ACTIVE_KEY))
+  ? String(process.env.OPENAI_ACTIVE_KEY)
+  : '1';
+
+export function setActiveOpenAIKey(which) {
+  const k = String(which);
+  if (!OPENAI_KEYS[k]) return activeOpenAIKey;
+  if (k !== activeOpenAIKey) {
+    // A previous key going terminal (401/429) marks the provider dead for the
+    // process. Switching keys is precisely the fix for that, so clear the
+    // tombstone or the new key would never get a chance to run.
+    dead.delete('openai');
+    activeOpenAIKey = k;
+  }
+  return activeOpenAIKey;
+}
+
+export function getActiveOpenAIKey() {
+  return activeOpenAIKey;
+}
+
+// Which keys are actually present, for the dashboard to render. Never returns
+// key material — only a last-4 fingerprint so the user can tell them apart.
+export function listOpenAIKeys() {
+  return Object.entries(OPENAI_KEYS).map(([id, get]) => {
+    const v = get();
+    return {
+      id,
+      configured: !!v,
+      fingerprint: v ? `…${v.slice(-6)}` : null,
+      active: id === activeOpenAIKey,
+    };
+  });
+}
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 // provider -> reason string, once it's known to be unusable this run
@@ -29,9 +76,10 @@ function isTerminal(err) {
 }
 
 async function callOpenAI(prompt, { temperature, maxTokens }) {
-  if (!process.env.OPENAI_API_KEY) throw Object.assign(new Error('no OPENAI_API_KEY'), { status: 401 });
+  const apiKey = OPENAI_KEYS[activeOpenAIKey]?.();
+  if (!apiKey) throw Object.assign(new Error(`no OpenAI key ${activeOpenAIKey} configured`), { status: 401 });
   const OpenAI = (await import('openai')).default;
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = new OpenAI({ apiKey });
   const res = await client.chat.completions.create({
     model: OPENAI_MODEL,
     messages: [{ role: 'user', content: prompt }],
@@ -90,7 +138,7 @@ export async function completeText(prompt, { temperature = 0, maxTokens } = {}) 
 // True when at least one provider is configured and not already known-dead.
 export function llmAvailable() {
   return ORDER.some(n => PROVIDERS[n] && !dead.has(n) && (
-    (n === 'openai' && process.env.OPENAI_API_KEY) ||
+    (n === 'openai' && OPENAI_KEYS[activeOpenAIKey]?.()) ||
     (n === 'gemini' && process.env.GEMINI_API_KEY)
   ));
 }
@@ -100,6 +148,8 @@ export function llmStatus() {
     order: ORDER,
     openaiModel: OPENAI_MODEL,
     geminiModel: GEMINI_MODEL,
+    openaiKeys: listOpenAIKeys(),
+    activeOpenAIKey,
     disabled: Object.fromEntries(dead),
   };
 }

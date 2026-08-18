@@ -110,6 +110,16 @@ async function main() {
   // roughly four days, after which it becomes a slow re-check rotation.
   await runSseTask('/api/ats-sweep', { limit: Number(process.env.ATS_SWEEP_LIMIT) || 1200 }, 'ats-sweep');
   await sleep(1000);
+  // Refresh the ATS board universe. Ingest is an idempotent upsert, and the
+  // probe phase works off least-recently-checked with a 7-day staleness
+  // window, so a daily call re-verifies roughly a seventh of the boards
+  // rather than re-probing all ~10k every night.
+  await runSseTask(
+    '/api/ats-boards/sync',
+    { sources: ['directory'], probeLimit: Number(process.env.BOARD_PROBE_LIMIT) || 3000, staleDays: 7 },
+    'ats-boards-sync'
+  );
+  await sleep(1000);
   await runSseTask('/api/scrape', { companyId: 'all', bust: true }, 'scrape-jobs');
   await sleep(1000);
   // Broad paginated role x city search. This is what actually surfaces new

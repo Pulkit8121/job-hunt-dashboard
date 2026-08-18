@@ -176,6 +176,27 @@ const MailInsightSchema = new mongoose.Schema({
 // pm2 restart (unlike the in-memory RunState modules) — e.g. "when did we
 // last email a CAPTCHA alert", so a 5-minute cron doesn't re-send it every
 // cycle. Not meant for anything larger than a timestamp/flag.
+// A job board that exists in the world, independent of whether we track the
+// company behind it. This is the collection the portal apply flow reads from.
+// Keeping it separate from `companies` is the point: company records are an
+// India/Naukri-shaped list that happens to include a few ATS users, whereas
+// this is the ATS universe itself.
+const AtsBoardSchema = new mongoose.Schema({
+  atsType:      { type: String, required: true },
+  slug:         { type: String, required: true },
+  name:         String,
+  source:       String,  // 'directory' | 'cdx' | 'company-sweep'
+  // Liveness, established by probing the board's public API rather than
+  // trusting the directory listing.
+  alive:        { type: Boolean, default: null },
+  jobCount:     { type: Number, default: 0 },
+  lastProbedAt: Date,
+  lastError:    String,
+}, { timestamps: true });
+AtsBoardSchema.index({ atsType: 1, slug: 1 }, { unique: true });
+// The apply flow asks for "live boards, least recently probed first".
+AtsBoardSchema.index({ alive: 1, lastProbedAt: 1 });
+
 const SystemStateSchema = new mongoose.Schema({
   key:   { type: String, required: true, unique: true },
   value: mongoose.Schema.Types.Mixed,
@@ -202,6 +223,7 @@ const MailInsight    = mongoose.models.MailInsight     || mongoose.model('MailIn
 const QuestionAnswer = mongoose.models.QuestionAnswer  || mongoose.model('QuestionAnswer',  QuestionAnswerSchema);
 const IdentitySettings = mongoose.models.IdentitySettings || mongoose.model('IdentitySettings', IdentitySettingsSchema);
 const SystemState    = mongoose.models.SystemState     || mongoose.model('SystemState',     SystemStateSchema);
+const AtsBoard       = mongoose.models.AtsBoard        || mongoose.model('AtsBoard',        AtsBoardSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -901,4 +923,70 @@ export async function setSystemState(key, value) {
   }
   await connectDB();
   await SystemState.findOneAndUpdate({ key }, { $set: { value } }, { upsert: true });
+}
+
+
+// ── ATS boards ────────────────────────────────────────────────────────────────
+// Bulk upsert of directory/CDX entries. Uses $setOnInsert for identity fields
+// so a re-sync can never clobber probe results already gathered for a board.
+export async function upsertAtsBoards(boards) {
+  if (!boards.length) return { inserted: 0 };
+  await connectDB();
+  const ops = boards.map(b => ({
+    updateOne: {
+      filter: { atsType: b.atsType, slug: b.slug },
+      update: { $setOnInsert: { atsType: b.atsType, slug: b.slug, name: b.name, source: b.source || 'directory' } },
+      upsert: true,
+    },
+  }));
+  let inserted = 0;
+  // Chunked: a single 12k-op bulkWrite exceeds the 16MB command limit.
+  for (let i = 0; i < ops.length; i += 1000) {
+    const res = await AtsBoard.bulkWrite(ops.slice(i, i + 1000), { ordered: false }).catch(() => null);
+    inserted += res?.upsertedCount || 0;
+  }
+  return { inserted };
+}
+
+export async function recordBoardProbe(atsType, slug, { alive, jobCount = 0, error = null }) {
+  await connectDB();
+  await AtsBoard.updateOne(
+    { atsType, slug },
+    { $set: { alive, jobCount, lastProbedAt: new Date(), lastError: error } },
+  ).catch(() => {});
+}
+
+// Boards still needing a liveness verdict, oldest-first so re-probes rotate.
+export async function readUnprobedBoards({ limit = 5000, staleDays = null } = {}) {
+  await connectDB();
+  const or = [{ lastProbedAt: null }];
+  if (staleDays) or.push({ lastProbedAt: { $lt: new Date(Date.now() - staleDays * 86400000) } });
+  return AtsBoard.find({ $or: or }, 'atsType slug name').sort({ lastProbedAt: 1 }).limit(limit).lean();
+}
+
+// The apply queue's board source: confirmed-live boards that actually had
+// postings when last probed.
+export async function readLiveBoards({ atsTypes = null, limit = 20000 } = {}) {
+  await connectDB();
+  const filter = { alive: true, jobCount: { $gt: 0 } };
+  if (atsTypes) filter.atsType = { $in: atsTypes };
+  return AtsBoard.find(filter, 'atsType slug name jobCount').sort({ lastProbedAt: 1 }).limit(limit).lean();
+}
+
+export async function atsBoardStats() {
+  await connectDB();
+  const rows = await AtsBoard.aggregate([
+    { $group: { _id: { atsType: '$atsType', alive: '$alive' }, n: { $sum: 1 }, jobs: { $sum: '$jobCount' } } },
+  ]);
+  const out = {};
+  for (const r of rows) {
+    const t = r._id.atsType;
+    out[t] = out[t] || { total: 0, live: 0, dead: 0, unprobed: 0, jobs: 0 };
+    out[t].total += r.n;
+    out[t].jobs += r.jobs || 0;
+    if (r._id.alive === true) out[t].live += r.n;
+    else if (r._id.alive === false) out[t].dead += r.n;
+    else out[t].unprobed += r.n;
+  }
+  return out;
 }

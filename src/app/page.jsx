@@ -8,6 +8,7 @@ import CompanyPortalPanel from '@/components/CompanyPortalPanel';
 import MailInsightsPanel from '@/components/MailInsightsPanel';
 import RecentJobsPanel from '@/components/RecentJobsPanel';
 import StatusPanel from '@/components/StatusPanel';
+import LlmKeyPanel from '@/components/LlmKeyPanel';
 import { getLinkedInPeopleTargets } from '@/lib/linkedin';
 import { getProfileHeaderLine } from '@/lib/profile';
 
@@ -510,7 +511,8 @@ export default function Dashboard() {
 
       {/* ── Live Status Tab ── */}
       {mainTab === 'status' && (
-        <main className="max-w-7xl mx-auto px-4 py-6 pb-24">
+        <main className="max-w-7xl mx-auto px-4 py-6 pb-24 space-y-4">
+          <LlmKeyPanel />
           <StatusPanel />
         </main>
       )}
