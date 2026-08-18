@@ -726,7 +726,7 @@ export async function readActiveSkippedLinks() {
 // CAPTCHA-gated, or a screening question the agent wouldn't guess at. These
 // are recorded as skipped so runs don't loop on them, which also made them
 // invisible; this surfaces them as a queue the user can finish by hand.
-export async function readManualQueue(reasons = ['captcha-detected', 'captcha-detected-post-submit', 'needs-human-answer', 'no-submit-button-found', 'form-validation-error']) {
+export async function readManualQueue(reasons = ['captcha-detected', 'captcha-detected-post-submit', 'needs-human-answer', 'no-submit-button-found', 'form-validation-error', 'captcha-security-code-required', 'resume-upload-failed']) {
   if (!useMongo) {
     return jsonReadSkipped()
       .filter(s => reasons.includes(s.reason))

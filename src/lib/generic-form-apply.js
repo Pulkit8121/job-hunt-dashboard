@@ -680,6 +680,26 @@ async function classifyOutcome(page) {
 // Returns { success, reason, captcha? }
 export async function applyToPortalJob(browser, job, { dryRun = false, onNote = () => {} } = {}) {
   const page = await browser.newPage();
+
+  // Greenhouse answers a low-scoring CAPTCHA with 428 and a body naming the
+  // address it will email a security code to:
+  //   {"code":"captcha-failed","security_code_recipient":"…@gmail.com"}
+  // That code is the bot-detection fallback, so it is not something to
+  // retrieve and enter automatically. Capturing the signal instead lets the
+  // job be routed to the manual queue, where the form is already filled and
+  // only the emailed code is missing.
+  let captchaFallback = null;
+  const watchSubmitResponses = async (res) => {
+    if (res.status() !== 428) return;
+    try {
+      const body = JSON.parse(await res.text());
+      if (body?.code === 'captcha-failed') {
+        captchaFallback = body.security_code_recipient || true;
+      }
+    } catch { /* not JSON — ignore */ }
+  };
+  page.on('response', watchSubmitResponses);
+
   try {
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.goto(job.link, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
@@ -797,6 +817,19 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
       return { success: false, reason: 'form-validation-error', audit: lastAudit, unresolved };
     }
 
+    // A CAPTCHA fallback is a specific, actionable outcome — the form is
+    // filled and only the emailed code is outstanding — so name it rather
+    // than lumping it in with generic unconfirmed submits.
+    if (captchaFallback) {
+      return {
+        success: false,
+        reason: 'captcha-security-code-required',
+        captcha: true,
+        securityCodeRecipient: typeof captchaFallback === 'string' ? captchaFallback : null,
+        audit: lastAudit,
+      };
+    }
+
     // No confirmation is a FAILURE, not a soft success.
     //
     // Treating it as success fabricated the entire result set: 797 of 811
@@ -812,6 +845,7 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
   } catch (e) {
     return { success: false, reason: `error: ${e.message}` };
   } finally {
+    page.off('response', watchSubmitResponses);
     await page.close().catch(() => {});
   }
 }
