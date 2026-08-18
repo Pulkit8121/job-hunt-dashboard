@@ -515,14 +515,19 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
     const answer = await answerField({ label: field.label, kind: field.kind, weakLabel: field.weakLabel }, job);
     if (answer) {
       const isPhone = /phone|mobile|telefon|téléphone|telefoon/i.test(field.label);
-      if (isPhone) {
-        const digits = normalizePhoneForField(answer);
-        // Real typing first; fall back to the setter if the field refuses it.
-        const typed = await typeTextField(page, field.refId, digits).catch(() => false);
-        if (!typed) await fillTextField(page, field.refId, digits).catch(() => {});
-      } else {
-        await fillTextField(page, field.refId, answer).catch(() => {});
-      }
+      const value = isPhone ? normalizePhoneForField(answer) : answer;
+
+      // Type for real, always — not just for phones.
+      //
+      // A native-setter write updates the DOM but does not look like user
+      // input to a front-end that persists each field as you go. Ashby
+      // registers values server-side with an ApiSetFormValue mutation per
+      // field, and only real key events trigger it: its submit came back
+      // "Missing entry for required field: Name" for a field that visibly
+      // contained the name, because the server had never been told. The
+      // setter remains as a fallback for inputs that reject typing.
+      const typed = await typeTextField(page, field.refId, value).catch(() => false);
+      if (!typed) await fillTextField(page, field.refId, value).catch(() => {});
       filled++;
     }
   }
@@ -689,7 +694,19 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
   // job be routed to the manual queue, where the form is already filled and
   // only the emailed code is missing.
   let captchaFallback = null;
+  // Ashby answers its submit mutation with a structured errorMessages array
+  // ("Missing entry for required field: Phone"). That is far better signal
+  // than anything readable from the DOM, so it feeds the repair loop.
+  let serverErrors = [];
   const watchSubmitResponses = async (res) => {
+    if (/non-user-graphql/.test(res.url()) && /SubmitSingleApplicationFormAction/.test(res.url())) {
+      try {
+        const body = await res.json();
+        const msgs = body?.data?.submitApplicationFormAction?.applicationFormResult?.errorMessages;
+        if (Array.isArray(msgs) && msgs.length) serverErrors = msgs;
+      } catch { /* not JSON — ignore */ }
+      return;
+    }
     if (res.status() !== 428) return;
     try {
       const body = JSON.parse(await res.text());
@@ -771,6 +788,7 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
       }
 
       const control = await findAdvanceControl(page);
+      onNote(`step ${step}: advance control = ${control || 'none'}`);
       if (!control) {
         // Legacy text-matching sweep as a last resort before declaring defeat.
         if (await findAndClickSubmit(page)) break;
@@ -778,7 +796,13 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
       }
 
       const urlBefore = page.url();
-      await clickAdvanceControl(page, control);
+      // Let per-field persistence settle before submitting. Ashby fires an
+      // ApiSetFormValue mutation per field as you type; submitting while
+      // those are still in flight means the server validates against a form
+      // it has not finished receiving.
+      await page.waitForNetworkIdle({ idleTime: 800, timeout: 8000 }).catch(() => {});
+      const clicked = await clickAdvanceControl(page, control);
+      onNote(`step ${step}: clicked ${control} = ${clicked}`);
       await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 1200));
 
@@ -827,6 +851,17 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
         captcha: true,
         securityCodeRecipient: typeof captchaFallback === 'string' ? captchaFallback : null,
         audit: lastAudit,
+      };
+    }
+
+    // The ATS told us exactly what is wrong — report that rather than a
+    // generic unconfirmed submit.
+    if (serverErrors.length) {
+      return {
+        success: false,
+        reason: 'form-validation-error',
+        audit: lastAudit,
+        unresolved: serverErrors.slice(0, 6),
       };
     }
 

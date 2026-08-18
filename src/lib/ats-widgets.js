@@ -326,7 +326,34 @@ export async function clickAdvanceControl(page, kind) {
   try {
     await handle.scrollIntoView().catch(() => {});
     await new Promise(r => setTimeout(r, 250));
-    await handle.click({ delay: 30 });
+
+    // A real click lands at the element's centre point, and Puppeteer does not
+    // complain if something else is on top — the click silently goes to the
+    // overlay. Ashby reported a successful submit click while firing no submit
+    // mutation, because an open combobox menu left over from filling was
+    // covering the button. Verify the button is genuinely the topmost element
+    // there, and clear overlays if it is not.
+    const isTopmost = () => handle.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+    }).catch(() => true);
+
+    if (!await isTopmost()) {
+      await page.keyboard.press('Escape').catch(() => {});   // close any open menu
+      await page.evaluate(() => document.body.click()).catch(() => {});
+      await new Promise(r => setTimeout(r, 300));
+      await handle.scrollIntoView().catch(() => {});
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    if (await isTopmost()) {
+      await handle.click({ delay: 30 });
+    } else {
+      // Still covered — a trusted click is impossible, so dispatch one at the
+      // element directly rather than clicking whatever is on top of it.
+      await handle.evaluate(el => el.click());
+    }
     return true;
   } catch {
     // Covered or detached — fall back to the synthetic click rather than
