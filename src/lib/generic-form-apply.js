@@ -6,10 +6,11 @@
 // CAPTCHA/bot-challenge.
 import path from 'path';
 import { answerField } from './application-agent.js';
+import { PROFILE } from './profile.js';
 import {
   extractComboboxes, openComboboxOptions, chooseComboboxOption,
   findUnfilledRequired, readFieldErrors, findAdvanceControl, clickAdvanceControl,
-  dismissConsentBanner,
+  dismissConsentBanner, auditFilledForm,
 } from './ats-widgets.js';
 
 const RESUME_PATH = process.env.RESUME_PATH || path.join(process.cwd(), 'data', 'resume.pdf');
@@ -100,8 +101,15 @@ async function extractFields(page) {
 
       // File inputs are matched by count/label downstream, and choice groups
       // carry their own labels, so only free-text fields are gated here.
+      // Skipping unlabelled fields avoids junk answers, but a REQUIRED
+      // unlabelled field then blocks submission — measured on Greenhouse as a
+      // required-empty with no label. Fall back to any weaker identifier
+      // before giving up on it.
+      const required = el.required || el.getAttribute('aria-required') === 'true';
+      const fallbackLabel = elLabel
+        || (required ? (el.placeholder || el.name || el.getAttribute('data-testid') || '') : '');
       if (el.type !== 'file' && el.type !== 'radio' && el.type !== 'checkbox'
-          && el.tagName !== 'SELECT' && isUnanswerable(el, elLabel)) {
+          && el.tagName !== 'SELECT' && isUnanswerable(el, fallbackLabel)) {
         return;
       }
 
@@ -113,12 +121,38 @@ async function extractFields(page) {
           ? Array.from(document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`))
           : [el];
         group.forEach((g, gi) => g.setAttribute('data-agent-ref', `${refId}-opt-${gi}`));
+
+        // Breezy renders EEO radios with no wrapping <label> and no label[for],
+        // so both the question and every option came back empty and 11
+        // required groups went unanswered. The shared name attribute
+        // ("race_ethnicity", "gender") is a perfectly good question label, and
+        // the value attribute is a perfectly good option label.
+        const optLabel = (g, gi) => {
+          const direct = labelFor(g);
+          if (direct) return direct;
+          const sibling = (g.nextElementSibling?.textContent || g.parentElement?.textContent || '').trim();
+          if (sibling && sibling.length < 90) return sibling;
+          return (g.value || `option ${gi + 1}`).replace(/[_-]+/g, ' ').trim();
+        };
+        // labelFor on the first radio returns that OPTION's text, not the
+        // question — a Breezy gender group came through labelled "Male", so
+        // the EEO rules never fired and it fell back to a decline answer.
+        // When the group label is just one of its own options, the shared
+        // name attribute ("gender", "race_ethnicity", "eeoc.veteran_status")
+        // is the real question.
+        const firstLabel = labelFor(el);
+        const optionTexts = group.map((g, gi) => optLabel(g, gi));
+        const labelIsAnOption = firstLabel && optionTexts.some(o => o === firstLabel);
+        const groupLabel = (!firstLabel || labelIsAnOption)
+          ? (el.name || firstLabel || '').replace(/[._-]+/g, ' ').trim()
+          : firstLabel;
         results.push({
           refId,
-          label: labelFor(el),
+          label: groupLabel,
           kind: 'choice',
+          required: group.some(g => g.required || g.getAttribute('aria-required') === 'true'),
           multi: el.type === 'checkbox' && group.length > 1,
-          options: group.map((g, gi) => ({ ref: `${refId}-opt-${gi}`, label: labelFor(g) })),
+          options: group.map((g, gi) => ({ ref: `${refId}-opt-${gi}`, label: optionTexts[gi] })),
         });
         return;
       }
@@ -135,12 +169,21 @@ async function extractFields(page) {
       } else if (el.type === 'file') {
         results.push({ refId, label: labelFor(el), kind: 'file' });
       } else {
-        results.push({ refId, label: labelFor(el), kind: el.tagName === 'TEXTAREA' ? 'textarea' : 'text' });
+        results.push({ refId, label: fallbackLabel || labelFor(el), kind: el.tagName === 'TEXTAREA' ? 'textarea' : 'text' });
       }
     });
 
     return results;
   });
+}
+
+// International phone widgets prepend whatever country is selected and then
+// reformat what you type. Writing "+91 8299559013" into one produced
+// "+246 82995 59013" — British Indian Ocean Territory — which would have been
+// submitted as an unreachable number. Compact E.164 with no spaces is what
+// these widgets actually parse to set the country themselves.
+function normalizePhoneForField(value) {
+  return value.replace(/[^\d+]/g, '');
 }
 
 async function fillTextField(page, refId, value) {
@@ -193,10 +236,15 @@ async function uploadResume(page, refId) {
 // hidden and carries no label at all — the form then bounced for a missing
 // required attachment. If the page has exactly one file field, it is the
 // resume field; there is nothing else it could be.
-function shouldUploadResume(field, fileFieldCount) {
-  if (/resume|cv\b|curriculum/i.test(field.label)) return true;
-  if (/cover.?letter|photo|portfolio|transcript/i.test(field.label)) return false;
-  return fileFieldCount === 1;
+function shouldUploadResume(field, fileFieldCount, index = 0) {
+  // Localised: a German Recruitee form labels the CV field "Lebenslauf", which
+  // matched nothing and left the required attachment empty.
+  if (/resume|cv\b|curriculum|lebenslauf|hoja de vida|cv-fil|meritförteckning/i.test(field.label)) return true;
+  if (/cover.?letter|anschreiben|lettre|photo|portfolio|transcript|certificate/i.test(field.label)) return false;
+  if (fileFieldCount === 1) return true;
+  // Several unrecognised file inputs: the resume is conventionally first, and
+  // an unattached required CV fails the whole submission.
+  return index === 0;
 }
 
 async function findAndClickSubmit(page) {
@@ -281,13 +329,14 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
     if (!wanted(field.refId)) continue;
 
     if (field.kind === 'file') {
-      if (shouldUploadResume(field, fileFieldCount) && await uploadResume(page, field.refId)) filled++;
+      const fileIndex = native.filter(f => f.kind === 'file').indexOf(field);
+      if (shouldUploadResume(field, fileFieldCount, fileIndex) && await uploadResume(page, field.refId)) filled++;
       continue;
     }
 
     if (field.kind === 'choice') {
       const options = field.options.map(o => o.label);
-      const answer = await answerField({ label: field.label, kind: 'choice', options }, job);
+      const answer = await answerField({ label: field.label, kind: 'choice', options, required: field.required }, job);
       if (!answer) continue;
       const chosen = field.options.find(o => o.label === answer);
       if (!chosen) continue;
@@ -303,7 +352,8 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
 
     const answer = await answerField({ label: field.label, kind: field.kind }, job);
     if (answer) {
-      await fillTextField(page, field.refId, answer).catch(() => {});
+      const isPhone = /phone|mobile|telefon|téléphone|telefoon/i.test(field.label);
+      await fillTextField(page, field.refId, isPhone ? normalizePhoneForField(answer) : answer).catch(() => {});
       filled++;
     }
   }
@@ -352,6 +402,93 @@ async function repairFromErrors(page, job) {
   return filled + gapsFilled > 0;
 }
 
+// Fill, read the form back, repair what is wrong, read it back again.
+//
+// A single fill pass reports success per-write, but a write can land and then
+// be reverted by the page's own React state, an answer can be a template
+// placeholder, or one answer can end up duplicated across distinct questions.
+// None of that is visible from the write side — only from reading the
+// finished form. Measured on live Greenhouse forms, this is where wrong data
+// was getting through.
+//
+// Bounded at MAX_FIX_PASSES: repairs that don't converge in a couple of
+// rounds are a form we don't understand, and repeating won't help.
+const MAX_FIX_PASSES = 2;
+
+// Values that legitimately repeat across a form (the applicant's own details),
+// so the duplicate-answer check doesn't flag them.
+function profileValues() {
+  return [PROFILE.name, PROFILE.email, PROFILE.phone, PROFILE.linkedinUrl,
+          PROFILE.githubUrl, PROFILE.currentLocation].filter(Boolean);
+}
+
+// Problem kinds a refill can plausibly fix. A bad email format won't improve
+// by asking again — that's a rule bug, worth surfacing but not looping on.
+const REPAIRABLE = new Set([
+  'required-empty', 'required-choice-empty', 'placeholder-value',
+  'duplicated-answer', 'overlong-value', 'wrong-country-code',
+]);
+
+// Intl phone widgets keep their own country state that typing does not always
+// change — a live Greenhouse form rendered an Indian number as
+// "+246 82995 59013" (British Indian Ocean Territory). When the audit reports
+// that, set the country explicitly through the widget's own selector instead
+// of retyping the number and getting the same result.
+async function repairPhoneCountry(page) {
+  const combos = await extractComboboxes(page, 900);
+  const phoneCombo = combos.find(c => /phone|country|code/i.test(c.label) || !c.label);
+  if (!phoneCombo) return false;
+  const opts = await openComboboxOptions(page, phoneCombo.refId);
+  if (!opts.length) return false;
+  const want = opts.find(o => /\bindia\b/i.test(o) && /\+?91\b/.test(o))
+            || opts.find(o => /\bindia\b/i.test(o));
+  if (!want) { await page.keyboard.press('Escape').catch(() => {}); return false; }
+  return chooseComboboxOption(page, phoneCombo.refId, want);
+}
+
+async function fillAndVerify(page, job, { onNote = () => {} } = {}) {
+  let filledCount = await fillVisibleFields(page, job);
+  await fillRequiredGaps(page, job);
+
+  let audit = await auditFilledForm(page, { profileValues: profileValues() });
+
+  for (let pass = 1; pass <= MAX_FIX_PASSES; pass++) {
+    const fixable = audit.problems.filter(p => REPAIRABLE.has(p.kind));
+    if (!fixable.length) break;
+
+    if (fixable.some(p => p.kind === 'wrong-country-code')) {
+      await repairPhoneCountry(page).catch(() => {});
+    }
+
+    // Clear a bad value before refilling: leaving a placeholder or a
+    // duplicated sentence in place means the refill has to overwrite it, and
+    // some controlled inputs ignore a write that doesn't change length.
+    const refs = new Set(fixable.map(p => p.ref).filter(Boolean));
+    if (refs.size) {
+      await page.evaluate((list) => {
+        for (const ref of list) {
+          const el = document.querySelector(`[data-agent-ref="${ref}"]`);
+          if (!el || !('value' in el)) continue;
+          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+          if (setter) setter.call(el, ''); else el.value = '';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }, [...refs]).catch(() => {});
+      filledCount += await fillVisibleFields(page, job, { only: refs });
+    }
+    await fillRequiredGaps(page, job);
+
+    const before = audit.problems.length;
+    audit = await auditFilledForm(page, { profileValues: profileValues() });
+    onNote(`repair pass ${pass}: ${before} problem(s) -> ${audit.problems.length}`);
+
+    // No improvement means the next pass won't help either.
+    if (audit.problems.length >= before) break;
+  }
+
+  return { filledCount, audit };
+}
+
 // 'success' | 'error' | 'unknown', from the page's own post-submit copy.
 async function classifyOutcome(page) {
   const text = await detectOutcomeText(page);
@@ -363,7 +500,7 @@ async function classifyOutcome(page) {
 }
 
 // Returns { success, reason, captcha? }
-export async function applyToPortalJob(browser, job) {
+export async function applyToPortalJob(browser, job, { dryRun = false, onNote = () => {} } = {}) {
   const page = await browser.newPage();
   try {
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
@@ -397,8 +534,11 @@ export async function applyToPortalJob(browser, job) {
     // that never advances) can't hold the run open.
     let filledAnything = false;
 
+    let lastAudit = null;
+
     for (let step = 1; step <= MAX_STEPS; step++) {
-      const filledCount = await fillVisibleFields(page, job);
+      const { filledCount, audit } = await fillAndVerify(page, job, { onNote });
+      lastAudit = audit;
       if (filledCount > 0) filledAnything = true;
 
       if (step === 1 && filledCount === 0) {
@@ -406,9 +546,11 @@ export async function applyToPortalJob(browser, job) {
         if (!anyFields) return { success: false, reason: 'no-form-fields-found' };
       }
 
-      // A required field left blank is a guaranteed bounce. Ask the agent again
-      // with the validation label as the prompt before spending the submit.
-      await fillRequiredGaps(page, job);
+      // Dry run stops here: everything up to the point of no return has
+      // happened, so the audit describes exactly what would have been sent.
+      if (dryRun) {
+        return { success: false, reason: 'dry-run', dryRun: true, audit, filledCount };
+      }
 
       // If filling revealed a real interactive challenge, hand off to manual.
       if (await hasBlockingCaptcha(page)) {
@@ -454,8 +596,13 @@ export async function applyToPortalJob(browser, job) {
       }
     }
 
-    if (outcome === 'success') return { success: true, reason: 'submitted' };
-    if (outcome === 'error') return { success: false, reason: 'form-validation-error' };
+    if (outcome === 'success') return { success: true, reason: 'submitted', audit: lastAudit };
+    if (outcome === 'error') {
+      // Carry the audit out so a validation failure is diagnosable from the
+      // run log instead of being an opaque reason string.
+      const unresolved = (lastAudit?.problems || []).map(p => `${p.kind}:${p.label}`.slice(0, 60));
+      return { success: false, reason: 'form-validation-error', audit: lastAudit, unresolved };
+    }
     // No clear confirmation text — the click did register, so treat as a soft
     // success rather than silently dropping it; worth spot-checking in logs.
     return { success: true, reason: 'submitted-unconfirmed' };

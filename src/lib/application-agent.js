@@ -13,6 +13,20 @@ import { readAnswerCache, saveAnswer } from './db.js';
 const FIELD_RULES = [
   { test: /linkedin/i, value: () => PROFILE.linkedinUrl, kind: 'text' },
   { test: /github|portfolio|website/i, value: () => PROFILE.githubUrl, kind: 'text' },
+  // Non-English forms are common on Recruitee/Teamtailor/Personio (measured:
+  // a German Recruitee form left Telefonnummer, start date, salary and
+  // Lebenslauf all unfilled because every rule was English-only).
+  { test: /vorname|prénom|voornaam|nombre/i, value: () => PROFILE.name.split(' ')[0], kind: 'text' },
+  { test: /nachname|nom de famille|achternaam|apellido/i, value: () => PROFILE.name.split(' ').slice(1).join(' '), kind: 'text' },
+  { test: /telefon|téléphone|telefoon|teléfono/i, value: () => PROFILE.phone, kind: 'text' },
+  { test: /lebenslauf|curriculum|cv\b/i, value: () => '', kind: 'file' },
+  { test: /gehalt|gewünschte[sn]? gehalt|salaire|salaris/i, value: () => '14 LPA', kind: 'text' },
+  { test: /frühesten|verfügbar|disponibilité|beschikbaar|startdatum/i, value: () => 'Immediate (15 days notice)', kind: 'text' },
+  // Some forms expose no label at all and only a name attribute — Breezy uses
+  // cName / cEmail / cPhoneNumber, which left all three required fields blank.
+  { test: /^c?_?(full)?name$/i, value: () => PROFILE.name, kind: 'text' },
+  { test: /^c?_?e-?mail(address)?$/i, value: () => PROFILE.email, kind: 'text' },
+  { test: /^c?_?phone(number)?$/i, value: () => PROFILE.phone, kind: 'text' },
   { test: /first\s*name/i, value: () => PROFILE.name.split(' ')[0], kind: 'text' },
   { test: /last\s*name/i, value: () => PROFILE.name.split(' ').slice(1).join(' ') || PROFILE.name.split(' ')[0], kind: 'text' },
   { test: /full\s*name|applicant\s*name|^\s*name\s*$/i, value: () => PROFILE.name, kind: 'text' },
@@ -147,6 +161,22 @@ Reply with ONLY the answer text (2-4 sentences, first person, no preamble, no ma
   return text;
 }
 
+// A required choice we can't interpret still has to be answered or the form
+// won't submit — measured on Breezy, where 13 required radio groups were left
+// blank because their labels came through as "section_1666121249877_ques…".
+// Prefer an explicit decline option, then a neutral negative; never invent a
+// qualification. Returns null if no safe option exists.
+export function safeRequiredChoice(options = []) {
+  const find = (re) => options.find(o => re.test(o));
+  // Apostrophe forms matter here. A live Breezy EEO group offers "I don't
+  // wish to answer", which a /do not wish/ pattern misses entirely — that one
+  // gap left every required self-identification group unanswered. Match the
+  // contracted and straight/curly-quote spellings too.
+  return find(/prefer not|decline|choose not|do ?n[o']?t wish|don.t wish|rather not|wish to answer|not to answer|not to disclose|not to self.identify|not specified|unspecified|prefer to self/i)
+      || find(/^\s*no\b/i)
+      || null;
+}
+
 // field: { label, kind: 'text'|'choice', options?: string[] }
 // job: the job object (title/description/companyName) for open-ended context.
 // Returns a string answer, or null to leave the field untouched.
@@ -166,8 +196,9 @@ export async function answerField(field, job) {
   }
 
   if (field.kind === 'choice' && field.options?.length) {
-    // Unrecognized choice field — don't guess on something we don't understand.
-    return null;
+    // Unrecognized choice field — don't guess on something we don't
+    // understand, UNLESS leaving it blank would block the submission.
+    return field.required ? safeRequiredChoice(field.options) : null;
   }
 
   const key = cacheKey(label, field.options);

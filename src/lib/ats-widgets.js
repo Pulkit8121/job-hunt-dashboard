@@ -284,3 +284,122 @@ export async function clickAdvanceControl(page, kind) {
     return true;
   }, kind, SUBMIT_WORDS, NEXT_WORDS).catch(() => false);
 }
+
+
+// ── Post-fill audit ─────────────────────────────────────────────────────────
+// Reads back what is ACTUALLY in the form after filling, rather than trusting
+// that each write landed. This exists because a fill that reports success can
+// still be wrong in ways only the finished form reveals: a value written to a
+// React-controlled input and then reverted, one answer duplicated across
+// several distinct questions, or a template placeholder submitted verbatim.
+//
+// Returns { problems: [{ ref, label, kind, detail }], filled, total }.
+export async function auditFilledForm(page, { profileValues = [] } = {}) {
+  return page.evaluate((profileVals) => {
+    const problems = [];
+    const isVisible = (el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 4 && r.height > 4 && el.offsetParent !== null;
+    };
+    const labelOf = (el) => {
+      if (el.id) {
+        const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (l?.textContent.trim()) return l.textContent.trim();
+      }
+      if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+      const g = el.closest('[class*="field" i], [class*="question" i], fieldset');
+      if (g && g.querySelectorAll('input:not([type=hidden]), select, textarea').length === 1) {
+        return (g.querySelector('label, legend')?.textContent || '').trim();
+      }
+      return (el.name || '').trim();
+    };
+
+    const controls = [...document.querySelectorAll('input, select, textarea')]
+      .filter(el => !el.disabled && !el.readOnly && isVisible(el)
+        && !['hidden', 'submit', 'button', 'image'].includes(el.type));
+
+    let filled = 0;
+    const textValues = new Map(); // value -> [labels] for duplicate detection
+
+    for (const el of controls) {
+      const label = labelOf(el);
+      const ref = el.getAttribute('data-agent-ref') || null;
+      const required = el.required || el.getAttribute('aria-required') === 'true';
+
+      if (el.type === 'file') {
+        if (el.files?.length) filled++;
+        else if (required) problems.push({ ref, label, kind: 'required-file-empty', detail: 'no file attached' });
+        continue;
+      }
+
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        const group = el.name ? [...document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`)] : [el];
+        if (group.some(g => g.checked)) filled++;
+        else if (required) problems.push({ ref, label, kind: 'required-choice-empty', detail: 'nothing selected' });
+        continue;
+      }
+
+      const value = (el.value || '').trim();
+      if (!value) {
+        if (required) problems.push({ ref, label, kind: 'required-empty', detail: 'left blank' });
+        continue;
+      }
+      filled++;
+
+      // A placeholder that survived into the form is worse than a blank.
+      if (/\[[^\]]{2,40}\]|\{\{|<[a-z ]+>/i.test(value)) {
+        problems.push({ ref, label, kind: 'placeholder-value', detail: value.slice(0, 60) });
+        continue;
+      }
+
+      // Free text landing in a field that wants a specific format.
+      if (el.type === 'email' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+        problems.push({ ref, label, kind: 'bad-email', detail: value.slice(0, 40) });
+      }
+      // Count digits overall rather than requiring a 6-digit run: intl phone
+      // widgets render "+91 82995 59013", which is correct but has no long
+      // consecutive run. A wrong country code is caught separately below.
+      if (el.type === 'tel' || /phone|mobile|telefon|telefoon|téléphone/i.test(label)) {
+        const digits = value.replace(/\D/g, '');
+        if (digits.length < 8) {
+          problems.push({ ref, label, kind: 'bad-phone', detail: value.slice(0, 40) });
+        } else if (profileVals.some(v => /^\+?\d/.test(v))) {
+          // The widget prepends whatever country is selected. If the rendered
+          // number does not start with the profile's own country code, the
+          // country selector picked the wrong entry — measured live as
+          // "+246 82995 59013" (British Indian Ocean Territory) for an Indian
+          // number, which would have been submitted as an unreachable phone.
+          const want = (profileVals.find(v => /^\+\d/.test(v)) || '').replace(/\D/g, '');
+          if (want && !digits.startsWith(want.slice(0, 2)) && /^\+/.test(value)) {
+            problems.push({ ref, label, kind: 'wrong-country-code', detail: value.slice(0, 40) });
+          }
+        }
+      }
+      if (el.type === 'number' && Number.isNaN(Number(value))) {
+        problems.push({ ref, label, kind: 'bad-number', detail: value.slice(0, 40) });
+      }
+      // A sentence in a field that clearly wants a short token.
+      if (/^(year|month|day|zip|postal|pincode)/i.test(label) && value.length > 20) {
+        problems.push({ ref, label, kind: 'overlong-value', detail: value.slice(0, 50) });
+      }
+
+      // Same long answer reused across different questions is the signature of
+      // the label-collision bug: distinct fields resolving to one label.
+      if (value.length > 25 && !profileVals.includes(value)) {
+        if (!textValues.has(value)) textValues.set(value, []);
+        textValues.get(value).push({ ref, label });
+      }
+    }
+
+    for (const [value, uses] of textValues) {
+      if (uses.length < 2) continue;
+      const distinctLabels = new Set(uses.map(u => u.label));
+      if (distinctLabels.size < 2) continue; // genuinely the same question twice
+      for (const u of uses) {
+        problems.push({ ref: u.ref, label: u.label, kind: 'duplicated-answer', detail: value.slice(0, 45) });
+      }
+    }
+
+    return { problems, filled, total: controls.length };
+  }, profileValues).catch(() => ({ problems: [], filled: 0, total: 0 }));
+}

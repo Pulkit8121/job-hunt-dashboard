@@ -200,7 +200,13 @@ export async function POST(request) {
           await markPortalJob(job.link, 'skipped', result.reason);
           skippedEntries.push({ link: job.link, reason: result.reason });
           const note = result.captcha ? ' — needs manual completion (CAPTCHA)' : '';
-          await send(`○ Skipped: ${job.title} at ${job.companyName} — ${result.reason}${note}`);
+          // Name the fields the repair loop could not resolve. Without this a
+          // validation failure is an opaque reason string and there is no way
+          // to tell which question the filler doesn't understand yet.
+          const detail = result.unresolved?.length
+            ? ` [unresolved: ${result.unresolved.slice(0, 4).join(', ')}]`
+            : '';
+          await send(`○ Skipped: ${job.title} at ${job.companyName} — ${result.reason}${note}${detail}`);
         }
 
         if (appliedEntries.length + skippedEntries.length >= 20) {
