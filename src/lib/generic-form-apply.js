@@ -363,17 +363,37 @@ function pickResumeField(fileFields) {
   return usable.find(f => f.required) || usable[0];
 }
 
+// Legacy fallback, kept only for forms whose submit text findAdvanceControl
+// doesn't know. Two things changed after tracing real submissions:
+//   - /apply/ is gone. It matched Greenhouse's decorative "Apply" button,
+//     which only scrolls to the form, so runs clicked it and reported success
+//     without ever submitting.
+//   - the click is a real Puppeteer click. The synthetic el.click() here
+//     carried isTrusted:false and modern ATS front-ends ignore it — Ashby
+//     accepted every field mutation and then no submit mutation at all.
 async function findAndClickSubmit(page) {
-  return page.evaluate(() => {
-    const candidates = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-    const btn = candidates.find(b => {
+  const tagged = await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(b => {
       const text = (b.textContent || b.value || '').trim().toLowerCase();
-      return /submit|apply/.test(text) && b.offsetParent !== null && !b.disabled;
+      return /\bsubmit\b/.test(text) && b.offsetParent !== null && !b.disabled;
     });
     if (!btn) return false;
-    btn.click();
+    btn.setAttribute('data-agent-submit-fallback', '1');
     return true;
-  });
+  }).catch(() => false);
+  if (!tagged) return false;
+
+  const handle = await page.$('[data-agent-submit-fallback="1"]');
+  if (!handle) return false;
+  try {
+    await handle.scrollIntoView().catch(() => {});
+    await handle.click({ delay: 30 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await handle.dispose();
+  }
 }
 
 async function detectOutcomeText(page) {
@@ -776,9 +796,19 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
       const unresolved = (lastAudit?.problems || []).map(p => `${p.kind}:${p.label}`.slice(0, 60));
       return { success: false, reason: 'form-validation-error', audit: lastAudit, unresolved };
     }
-    // No clear confirmation text — the click did register, so treat as a soft
-    // success rather than silently dropping it; worth spot-checking in logs.
-    return { success: true, reason: 'submitted-unconfirmed' };
+
+    // No confirmation is a FAILURE, not a soft success.
+    //
+    // Treating it as success fabricated the entire result set: 797 of 811
+    // recorded applications were "submitted-unconfirmed", and the user's
+    // inbox contained zero acknowledgements from any of those companies over
+    // three days of mass applying. A network-level trace confirmed why — the
+    // only POSTs were analytics and the S3 resume upload, with no request to
+    // any application endpoint at all.
+    //
+    // An unconfirmed submit is indistinguishable from no submit, so it must
+    // not be counted as one.
+    return { success: false, reason: 'submit-unconfirmed', audit: lastAudit };
   } catch (e) {
     return { success: false, reason: `error: ${e.message}` };
   } finally {

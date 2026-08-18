@@ -206,8 +206,15 @@ export async function readFieldErrors(page) {
 // (Dutch) and Teamtailor's "Envoyer ma candidature" (French), so an
 // English-only matcher reported no-submit-button-found on forms that were
 // perfectly fillable.
+// NOTE: bare "apply" is deliberately absent. Greenhouse renders a decorative
+// "Apply" button at the top of the posting that only scrolls to the form —
+// matching it meant the run clicked that, never submitted, and still reported
+// success. Verified at the network level: the only POSTs were analytics and
+// the S3 resume upload, with no request to any application endpoint, and the
+// page ended back on the job description. Real submit controls say "Submit
+// Application" or are a genuine type=submit inside the form.
 const SUBMIT_WORDS = [
-  'submit', 'submit application', 'send application', 'apply', 'finish', 'send',
+  'submit', 'submit application', 'send application', 'finish', 'send',
   'versturen', 'verzenden', 'solliciteer',                       // nl
   'envoyer', 'envoyer ma candidature', 'postuler', 'soumettre',  // fr
   'senden', 'bewerbung absenden', 'absenden', 'bewerben',        // de
@@ -271,9 +278,11 @@ export async function findAdvanceControl(page) {
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const startsWithAny = (t, words) => words.some(w => t === w || t.startsWith(w + ' '));
 
-    // Submit wins over Next when both are present — the last page of a wizard
-    // often keeps a disabled-looking Back/Next pair alongside the real submit.
-    const submit = buttons.find(b => startsWithAny(textOf(b), submitWords));
+    // Text first: Ashby renders "Upload File" as type=submit and Breezy's real
+    // submit is type="button", so the element type alone is not a reliable
+    // signal. With bare "apply" excluded from SUBMIT_WORDS the text match is.
+    const submit = buttons.find(b => startsWithAny(textOf(b), submitWords))
+      || buttons.find(b => b.closest('form') && b.type === 'submit');
     if (submit) return 'submit';
     const next = buttons.find(b => startsWithAny(textOf(b), nextWords));
     if (next) return 'next';
@@ -282,23 +291,53 @@ export async function findAdvanceControl(page) {
 }
 
 export async function clickAdvanceControl(page, kind) {
-  return page.evaluate((want, submitWords, nextWords) => {
+  // Tag the target in-page, then click it for REAL through Puppeteer.
+  //
+  // A synthetic el.click() from page.evaluate carries isTrusted:false, and
+  // modern ATS front-ends ignore it for submission — the same failure already
+  // documented for Naukri's apply button in naukri.js. Ashby logged every
+  // ApiSetFormValue mutation for the filled fields and then no submit mutation
+  // at all, because the click never counted.
+  const tagged = await page.evaluate((want, submitWords, nextWords) => {
     const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')]
       .filter(b => !b.disabled && b.offsetParent !== null && b.getBoundingClientRect().height > 0);
     const textOf = (b) => (b.textContent || b.value || '').trim().toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const words = want === 'submit' ? submitWords : nextWords;
-    const btn = buttons.find(b => {
+
+    // Prefer an explicit text match over a bare type=submit: Ashby renders its
+    // "Upload File" controls as type=submit too, and Breezy's real submit is
+    // type="button". Text is the reliable signal once bare "apply" is excluded.
+    const byText = buttons.find(b => {
       const t = textOf(b);
       return words.some(w => t === w || t.startsWith(w + ' '));
     });
-    if (!btn) return false;
-    btn.scrollIntoView({ block: 'center' });
-    btn.click();
-    return true;
-  }, kind, SUBMIT_WORDS, NEXT_WORDS).catch(() => false);
-}
+    const btn = byText
+      || (want === 'submit' && buttons.find(b => b.closest('form') && b.type === 'submit'));
+    if (!btn) return null;
+    btn.setAttribute('data-agent-submit', '1');
+    return (btn.textContent || btn.value || '').trim().slice(0, 40);
+  }, kind, SUBMIT_WORDS, NEXT_WORDS).catch(() => null);
 
+  if (!tagged) return false;
+
+  const handle = await page.$('[data-agent-submit="1"]');
+  if (!handle) return false;
+  try {
+    await handle.scrollIntoView().catch(() => {});
+    await new Promise(r => setTimeout(r, 250));
+    await handle.click({ delay: 30 });
+    return true;
+  } catch {
+    // Covered or detached — fall back to the synthetic click rather than
+    // losing the attempt entirely.
+    await page.evaluate(el => el.click(), handle).catch(() => {});
+    return true;
+  } finally {
+    await handle.evaluate(el => el.removeAttribute('data-agent-submit')).catch(() => {});
+    await handle.dispose();
+  }
+}
 
 // ── Post-fill audit ─────────────────────────────────────────────────────────
 // Reads back what is ACTUALLY in the form after filling, rather than trusting
