@@ -31,6 +31,10 @@ const FIELD_RULES = [
   { test: /last\s*name/i, value: () => PROFILE.name.split(' ').slice(1).join(' ') || PROFILE.name.split(' ')[0], kind: 'text' },
   { test: /full\s*name|applicant\s*name|^\s*name\s*$/i, value: () => PROFILE.name, kind: 'text' },
   { test: /e[-\s]?mail/i, value: () => PROFILE.email, kind: 'text' },
+  // Must come after the e-mail rule and must not match inside a compound:
+  // Dutch "E-mailadres" ends in "adres", so a bare /adres\b/ hijacked the
+  // email field and wrote the applicant's city into it.
+  { test: /^c?_?address$|street address|postal address|\badresse\b|(?<![a-z-])adres\b/i, value: () => PROFILE.currentLocation, kind: 'text' },
   // Country-code pickers sit next to the phone field and match /phone/ too,
   // but they want a dial code, not the full number. Measured on a live
   // Greenhouse form: the phone combobox offers 60 country options, and
@@ -228,6 +232,11 @@ export async function answerField(field, job) {
     // understand, UNLESS leaving it blank would block the submission.
     return field.required ? safeRequiredChoice(field.options) : null;
   }
+
+  // A label inferred from a name attribute is fine for the rules above but
+  // must not drive free-text generation — the model would be answering a
+  // question nobody actually asked.
+  if (field.weakLabel) return null;
 
   const key = cacheKey(label, field.options);
   const cache = await getCache();

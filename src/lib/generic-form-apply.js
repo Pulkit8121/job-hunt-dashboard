@@ -106,8 +106,22 @@ async function extractFields(page) {
       // required-empty with no label. Fall back to any weaker identifier
       // before giving up on it.
       const required = el.required || el.getAttribute('aria-required') === 'true';
-      const fallbackLabel = elLabel
-        || (required ? (el.placeholder || el.name || el.getAttribute('data-testid') || '') : '');
+      // Derive a label from the name attribute when there is no visible one.
+      // Skipping unlabelled fields avoids junk LLM answers, but it also
+      // skipped real fields: a Teamtailor form left candidate[phone] and
+      // candidate[location][query] blank purely because neither carried a
+      // <label>, even though the name says exactly what they are.
+      // nameToLabel strips the wrapper syntax: candidate[phone] -> "phone".
+      const nameToLabel = (n = '') => n
+        .replace(/^[a-z_]+\[/i, '').replace(/\]\[/g, ' ').replace(/[[\]_-]+/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+      const derived = elLabel || el.placeholder || nameToLabel(el.name || '')
+        || (required ? (el.getAttribute('data-testid') || '') : '');
+      const fallbackLabel = derived;
+      // A label we inferred rather than read is trustworthy enough for the
+      // deterministic rules but not for free-text generation, where a wrong
+      // guess becomes a sentence in someone's application.
+      const weakLabel = !elLabel;
       if (el.type !== 'file' && el.type !== 'radio' && el.type !== 'checkbox'
           && el.tagName !== 'SELECT' && isUnanswerable(el, fallbackLabel)) {
         return;
@@ -167,9 +181,19 @@ async function extractFields(page) {
           options: Array.from(el.options).map((o, oi) => ({ ref: String(oi), label: o.textContent.trim() })).filter(o => o.label),
         });
       } else if (el.type === 'file') {
-        results.push({ refId, label: labelFor(el), kind: 'file' });
+        results.push({
+          refId,
+          label: labelFor(el),
+          kind: 'file',
+          required: el.required || el.getAttribute('aria-required') === 'true',
+        });
       } else {
-        results.push({ refId, label: fallbackLabel || labelFor(el), kind: el.tagName === 'TEXTAREA' ? 'textarea' : 'text' });
+        results.push({
+          refId,
+          label: fallbackLabel || labelFor(el),
+          kind: el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
+          weakLabel,
+        });
       }
     });
 
@@ -197,10 +221,24 @@ async function typeTextField(page, refId, value) {
   if (!handle) return false;
   try {
     await handle.scrollIntoView().catch(() => {});
-    await handle.click({ clickCount: 3 }).catch(() => {});   // select existing content
+    // Click alone is not enough to guarantee focus — if the input is covered
+    // by an overlay the click lands elsewhere and every keystroke goes to
+    // whatever *is* focused. Measured on Teamtailor: typing raised no error
+    // and left the field completely empty.
+    await handle.click({ clickCount: 3 }).catch(() => {});
+    await handle.evaluate(el => el.focus()).catch(() => {});
     await page.keyboard.press('Backspace').catch(() => {});
     await handle.type(value, { delay: 12 });
     await handle.evaluate(el => el.dispatchEvent(new Event('change', { bubbles: true }))).catch(() => {});
+
+    // Verify rather than trusting "no exception thrown". Returning true here
+    // when nothing landed is what suppressed the setter fallback and left the
+    // field blank. A widget that reformats (spaces, country prefix) is fine —
+    // only compare the digits.
+    const got = await handle.evaluate(el => el.value || '').catch(() => '');
+    const digitsOf = (v) => v.replace(/\D/g, '');
+    if (!got.trim()) return false;
+    if (/\d/.test(value) && digitsOf(value) && !digitsOf(got).includes(digitsOf(value).slice(-8))) return false;
     return true;
   } catch {
     return false;
@@ -241,12 +279,48 @@ async function clickChoiceOption(page, optionRef) {
   await handle.dispose();
 }
 
+// Attaches the resume and CONFIRMS it landed.
+//
+// Returning true on "uploadFile did not throw" was wrong for dropzone-style
+// widgets: Teamtailor accepted the call, swapped its hidden input for a fresh
+// one, and ended up with no file attached — the run reported a successful
+// upload and submitted without a CV. Verified by re-reading the input's own
+// FileList, with one retry against a freshly-queried handle since the element
+// we uploaded to may no longer be the one the widget is using.
 async function uploadResume(page, refId) {
-  const handle = await page.$(`[data-agent-ref="${refId}"]`);
+  const attach = async () => {
+    const handle = await page.$(`[data-agent-ref="${refId}"]`);
+    if (!handle) return null;
+    try {
+      await handle.uploadFile(RESUME_PATH);
+      await new Promise(r => setTimeout(r, 400));
+      return await handle.evaluate(el => el.files?.length || 0).catch(() => 0);
+    } catch {
+      return 0;
+    } finally {
+      await handle.dispose();
+    }
+  };
+
+  if (await attach()) return true;
+
+  // Second attempt: the widget may have replaced the input, so target whatever
+  // file input is now present and unfilled rather than the original ref.
+  const retried = await page.evaluate(() => {
+    const empty = [...document.querySelectorAll('input[type="file"]')]
+      .find(e => !e.disabled && !(e.files?.length));
+    if (!empty) return null;
+    empty.setAttribute('data-agent-ref', 'agent-resume-retry');
+    return true;
+  }).catch(() => null);
+  if (!retried) return false;
+
+  const handle = await page.$('[data-agent-ref="agent-resume-retry"]');
   if (!handle) return false;
   try {
     await handle.uploadFile(RESUME_PATH);
-    return true;
+    await new Promise(r => setTimeout(r, 400));
+    return (await handle.evaluate(el => el.files?.length || 0).catch(() => 0)) > 0;
   } catch {
     return false;
   } finally {
@@ -259,15 +333,34 @@ async function uploadResume(page, refId) {
 // hidden and carries no label at all — the form then bounced for a missing
 // required attachment. If the page has exactly one file field, it is the
 // resume field; there is nothing else it could be.
-function shouldUploadResume(field, fileFieldCount, index = 0) {
-  // Localised: a German Recruitee form labels the CV field "Lebenslauf", which
-  // matched nothing and left the required attachment empty.
-  if (/resume|cv\b|curriculum|lebenslauf|hoja de vida|cv-fil|meritförteckning/i.test(field.label)) return true;
-  if (/cover.?letter|anschreiben|lettre|photo|portfolio|transcript|certificate/i.test(field.label)) return false;
-  if (fileFieldCount === 1) return true;
-  // Several unrecognised file inputs: the resume is conventionally first, and
-  // an unattached required CV fails the whole submission.
-  return index === 0;
+// Which file input gets the resume, given every file field on the page.
+// Returns the winning field, or null.
+//
+// Choosing per-field by label then falling back to "first one" was wrong on
+// Workable: both of its file inputs carry the label "SVGs not supported by
+// this browser." (an <svg> fallback node), so the fallback attached the
+// resume to input 0 — the OPTIONAL one — while input 1 was the required
+// upload and stayed empty, failing the submission.
+//
+// Deciding across all candidates at once lets a required input win over a
+// merely-first one.
+function pickResumeField(fileFields) {
+  if (!fileFields.length) return null;
+
+  const isJunkLabel = (l = '') => !l || /svgs? not supported|choose file|drop your file|drag and drop/i.test(l);
+  const named = (re) => fileFields.find(f => !isJunkLabel(f.label) && re.test(f.label));
+
+  // Localised: a German Recruitee form labels the CV field "Lebenslauf".
+  const explicit = named(/resume|cv\b|curriculum|lebenslauf|hoja de vida|cv-fil|meritförteckning/i);
+  if (explicit) return explicit;
+
+  const notResume = /cover.?letter|anschreiben|lettre|photo|portfolio|transcript|certificate|additional/i;
+  const usable = fileFields.filter(f => isJunkLabel(f.label) || !notResume.test(f.label));
+  if (!usable.length) return null;
+  if (usable.length === 1) return usable[0];
+
+  // A required upload is the one that blocks submission, so it wins.
+  return usable.find(f => f.required) || usable[0];
 }
 
 async function findAndClickSubmit(page) {
@@ -300,8 +393,35 @@ function pageHasFillableFields(page) {
 // route revealed by the "Apply" button). Greenhouse renders the form inline, so
 // this is a no-op there. Navigates/clicks through to a page that actually has
 // fillable fields so the rest of the flow has a form to work with.
+// Does this page have an actual APPLICATION form, as opposed to a posting
+// page that merely contains a search box or newsletter input? Requiring a file
+// input or a decent field count avoids being fooled by the latter — a
+// Teamtailor posting page satisfied "has fillable fields" on its site search
+// alone, so the flow never routed to the real form and filled 4 of 10 fields
+// on the wrong one.
+function pageHasApplicationForm(page) {
+  return page.evaluate(() => {
+    const usable = [...document.querySelectorAll('input, select, textarea')]
+      .filter(e => !e.disabled && !['hidden', 'submit', 'button', 'image'].includes(e.type));
+    const hasFile = usable.some(e => e.type === 'file');
+    const hasEmail = usable.some(e => e.type === 'email' || /e-?mail/i.test(e.name + e.id));
+    return hasFile || (hasEmail && usable.length >= 4);
+  }).catch(() => false);
+}
+
 async function ensureApplyForm(page, job) {
-  if (await pageHasFillableFields(page)) return;
+  if (await pageHasApplicationForm(page)) return;
+
+  // Teamtailor: the application form is a stable sub-path off the posting,
+  // the same shape as Lever's /apply.
+  if (job.atsType === 'teamtailor') {
+    const base = page.url().split('?')[0].replace(/\/+$/, '');
+    if (!/\/applications\/new$/.test(base)) {
+      await page.goto(`${base}/applications/new`, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT }).catch(() => {});
+      await page.waitForSelector('input[type="file"], form input', { timeout: 10000 }).catch(() => {});
+      if (await pageHasApplicationForm(page)) return;
+    }
+  }
 
   // Lever: application form is a stable /apply sub-path.
   if (job.atsType === 'lever') {
@@ -346,14 +466,13 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
   let filled = 0;
 
   const wanted = (refId) => !only || only.has(refId);
-  const fileFieldCount = native.filter(f => f.kind === 'file').length;
+  const resumeField = pickResumeField(native.filter(f => f.kind === 'file'));
 
   for (const field of native) {
     if (!wanted(field.refId)) continue;
 
     if (field.kind === 'file') {
-      const fileIndex = native.filter(f => f.kind === 'file').indexOf(field);
-      if (shouldUploadResume(field, fileFieldCount, fileIndex) && await uploadResume(page, field.refId)) filled++;
+      if (field.refId === resumeField?.refId && await uploadResume(page, field.refId)) filled++;
       continue;
     }
 
@@ -373,7 +492,7 @@ async function fillVisibleFields(page, job, { only = null } = {}) {
       continue;
     }
 
-    const answer = await answerField({ label: field.label, kind: field.kind }, job);
+    const answer = await answerField({ label: field.label, kind: field.kind, weakLabel: field.weakLabel }, job);
     if (answer) {
       const isPhone = /phone|mobile|telefon|téléphone|telefoon/i.test(field.label);
       if (isPhone) {
@@ -458,7 +577,7 @@ function profileValues() {
 // by asking again — that's a rule bug, worth surfacing but not looping on.
 const REPAIRABLE = new Set([
   'required-empty', 'required-choice-empty', 'placeholder-value',
-  'duplicated-answer', 'overlong-value', 'wrong-country-code',
+  'duplicated-answer', 'overlong-value', 'wrong-country-code', 'bad-phone',
 ]);
 
 // Intl phone widgets keep their own country state that typing does not always
@@ -488,8 +607,15 @@ async function fillAndVerify(page, job, { onNote = () => {} } = {}) {
     const fixable = audit.problems.filter(p => REPAIRABLE.has(p.kind));
     if (!fixable.length) break;
 
-    if (fixable.some(p => p.kind === 'wrong-country-code')) {
+    // A phone field holding only a country prefix ("+31") means the write was
+    // rejected by the widget, not that the number is wrong — retry the number
+    // itself as well as the country selector.
+    const phoneProblem = fixable.find(p => p.kind === 'wrong-country-code' || p.kind === 'bad-phone');
+    if (phoneProblem) {
       await repairPhoneCountry(page).catch(() => {});
+      if (phoneProblem.ref) {
+        await typeTextField(page, phoneProblem.ref, PROFILE.phone.replace(/[^\d+]/g, '')).catch(() => {});
+      }
     }
 
     // Clear a bad value before refilling: leaving a placeholder or a
@@ -582,6 +708,21 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
       // happened, so the audit describes exactly what would have been sent.
       if (dryRun) {
         return { success: false, reason: 'dry-run', dryRun: true, audit, filledCount };
+      }
+
+      // Never submit an application whose required CV did not attach. Some
+      // dropzone widgets (measured on Teamtailor) accept a programmatic file
+      // and then manage it entirely in JS, so the input reports no file and
+      // the submission would go out with no resume at all. Submitting is
+      // irreversible, so a skip the manual queue can pick up beats a silent
+      // CV-less application.
+      if (audit.problems.some(p => p.kind === 'required-file-empty')) {
+        return {
+          success: false,
+          reason: 'resume-upload-failed',
+          audit,
+          unresolved: ['required CV did not attach'],
+        };
       }
 
       // If filling revealed a real interactive challenge, hand off to manual.
