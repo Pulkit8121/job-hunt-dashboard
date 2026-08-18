@@ -64,7 +64,7 @@ const JobSchema = new mongoose.Schema({
   companyId:     { type: String, required: true, index: true },
   title:         String,
   jobId:         String,
-  link:          String,
+  link:          { type: String, index: true },
   location:      String,
   experienceText:String,
   description:   String,
@@ -103,6 +103,16 @@ const SkippedJobSchema = new mongoose.Schema({
   link:   { type: String, required: true, unique: true },
   reason: String,
   skippedAt: { type: Date, default: Date.now },
+  // Retry bookkeeping. Most skip reasons are NOT permanent facts about the job
+  // — "no-apply-button" is usually a stale/expired listing, a page that hadn't
+  // finished rendering, or a lost login session, and "form-validation-error" is
+  // usually a field the filler didn't understand yet. Recording every one of
+  // those as a permanent tombstone is what emptied the apply queue: 2,287 jobs
+  // were retired for "no-apply-button" alone and could never be reconsidered.
+  // These two fields let RETRYABLE_SKIP_REASONS come back after a cooldown,
+  // while still guaranteeing forward progress via a hard attempt ceiling.
+  attempts:      { type: Number, default: 1 },
+  lastAttemptAt: { type: Date, default: Date.now },
 });
 
 const OutreachContactSchema = new mongoose.Schema({
@@ -111,15 +121,36 @@ const OutreachContactSchema = new mongoose.Schema({
   email:        { type: String, required: true, unique: true },
   source:       String,  // 'careers-page' | 'company-site' | 'search'
   confidence:   { type: String, default: 'medium' }, // 'high' | 'medium' | 'low'
-  status:       { type: String, default: 'pending' }, // pending | sent | skipped | bounced
+  status:       { type: String, default: 'pending' }, // pending | sent | skipped | bounced | invalid
   sentAt:       Date,
   coverLetter:  String,
+  sentFromIdentity: String, // 'primary' | 'secondary' — which Gmail account + resume this went out from
   failCount:    { type: Number, default: 0 },
   lastFailReason: String,
   replyStatus:  String,  // interested | rejected | auto-reply | other
   replySnippet: String,
   repliedAt:    Date,
+  // Detected from a reply: a different email the sender asked us to use
+  // instead (auto-enqueued as a new 'referred' contact — see check-replies),
+  // and whether they raised a location-based objection (e.g. "we're only
+  // hiring in Belgium/Europe") that triggers a relocation follow-up.
+  altContactEmail:  String,
+  locationObjection: Boolean,
+  followUpSentAt:   Date,   // when the follow-up reply went out, if any
+  followUpReason:   String, // 'relocation' | 'no-opening'
   discoveredAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+// Per-identity outreach controls, editable from the dashboard — a manual
+// "how many to send today" override and an automatic-sending on/off switch.
+// Separate from OUTREACH_DAILY_CAP (the global env fallback): dailyLimit here
+// is the hard per-identity ceiling that BOTH the bulk queue-send route and the
+// one-off manual-send route enforce against the same running total, so a mix
+// of automatic + manual sends can never together cross it.
+const IdentitySettingsSchema = new mongoose.Schema({
+  identityId:      { type: String, required: true, unique: true }, // 'primary' | 'secondary'
+  dailyLimit:      { type: Number, default: 150 },
+  autoSendEnabled: { type: Boolean, default: true },
 }, { timestamps: true });
 
 const MailInsightSchema = new mongoose.Schema({
@@ -130,6 +161,16 @@ const MailInsightSchema = new mongoose.Schema({
   category:  String, // 'positive' | 'assessment' | 'rejected' | 'other'
   receivedAt:Date,
   scannedAt: { type: Date, default: Date.now },
+  mailbox:   String, // which identity's inbox this was found in
+}, { timestamps: true });
+
+// Generic key/value store for small pieces of state that need to survive a
+// pm2 restart (unlike the in-memory RunState modules) — e.g. "when did we
+// last email a CAPTCHA alert", so a 5-minute cron doesn't re-send it every
+// cycle. Not meant for anything larger than a timestamp/flag.
+const SystemStateSchema = new mongoose.Schema({
+  key:   { type: String, required: true, unique: true },
+  value: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
 // Persistent cache of screening-question answers, so a question we've already
@@ -151,6 +192,8 @@ const SkippedJob     = mongoose.models.SkippedJob      || mongoose.model('Skippe
 const OutreachContact= mongoose.models.OutreachContact || mongoose.model('OutreachContact', OutreachContactSchema);
 const MailInsight    = mongoose.models.MailInsight     || mongoose.model('MailInsight',     MailInsightSchema);
 const QuestionAnswer = mongoose.models.QuestionAnswer  || mongoose.model('QuestionAnswer',  QuestionAnswerSchema);
+const IdentitySettings = mongoose.models.IdentitySettings || mongoose.model('IdentitySettings', IdentitySettingsSchema);
+const SystemState    = mongoose.models.SystemState     || mongoose.model('SystemState',     SystemStateSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -207,6 +250,13 @@ function jsonReadMailInsights() {
 }
 function jsonWriteMailInsights(data) {
   fs.writeFileSync(path.join(DATA_DIR, 'mail-insights.json'), JSON.stringify(data, null, 2));
+}
+function jsonReadSystemState() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'system-state.json'), 'utf-8')); }
+  catch { return {}; }
+}
+function jsonWriteSystemState(data) {
+  fs.writeFileSync(path.join(DATA_DIR, 'system-state.json'), JSON.stringify(data, null, 2));
 }
 
 // ── Seed + backfill ───────────────────────────────────────────────────────────
@@ -272,6 +322,18 @@ export async function updateCompany(id, update) {
 }
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
+// The jobs collection has grown to 14k+ documents. Measured directly against
+// this box's connection to Atlas: a consistent ~7ms/doc regardless of
+// document size (network latency to the cluster, not payload weight) — so an
+// unfiltered fetch-everything call here took 40-60s+ and is what caused live
+// 504s on /api/jobs. Capped to the most recent DEFAULT_JOB_LIMIT when no
+// companyId narrows the query; sorting by _id (not a separate timestamp
+// field) reuses Mongo's existing default index for a fast top-N instead of a
+// full-collection sort. 500 keeps this at ~3.5s instead of 60s+; the real fix
+// for a truly snappy dashboard is separating fast aggregate counts from a
+// small paginated list, not raising this number.
+const DEFAULT_JOB_LIMIT = 500;
+
 export async function readJobs(companyId) {
   if (!useMongo) {
     const jobs = jsonReadJobs();
@@ -280,8 +342,95 @@ export async function readJobs(companyId) {
   }
   await connectDB();
   const filter = companyId ? { companyId } : {};
-  const jobs = await Job.find(filter).lean();
+  let query = Job.find(filter).lean();
+  if (!companyId) query = query.sort({ _id: -1 }).limit(DEFAULT_JOB_LIMIT);
+  const jobs = await query;
   return sortJobsBySource(filterEligibleJobs(jobs, Number.MAX_SAFE_INTEGER).eligible);
+}
+
+// Builds the Naukri auto-apply queue.
+//
+// This replaces `readJobsRaw({ linkContains: 'naukri.com' })` + client-side
+// skip filtering, which measured at literally ZERO throughput: readJobsRaw
+// caps at the newest DEFAULT_JOB_LIMIT (500) documents BEFORE the caller gets
+// to drop already-skipped links, and with 4,043 skip tombstones accumulated
+// against 14,185 stored Naukri jobs, all 492 unique links in that newest-500
+// window were already skipped. Every run therefore opened with an empty
+// target list and applied to nothing, which is the direct cause of the 1-2
+// applications/day the dashboard was reporting.
+//
+// Fix: page through newest-first in chunks and filter as we go, stopping as
+// soon as `limit` genuinely-queueable jobs are found — so the window slides
+// past the tombstones instead of being blocked by them.
+export async function readNaukriApplyQueue({ limit = 300, skippedLinks = new Set(), maxAgeDays = null } = {}) {
+  const FIELDS = 'link title jobId companyId createdAt';
+  const CHUNK = 2000;
+  const MAX_SCAN = 20000; // hard bound so a fully-exhausted collection can't spin
+  const cutoff = maxAgeDays ? Date.now() - maxAgeDays * 86400000 : null;
+
+  const out = [];
+  const seen = new Set();
+  const take = (rows) => {
+    for (const j of rows) {
+      if (!j.link?.includes('naukri.com')) continue;
+      const key = j.link.split('?')[0];
+      if (seen.has(key) || skippedLinks.has(key)) continue;
+      if (cutoff && j.createdAt && new Date(j.createdAt).getTime() < cutoff) continue;
+      seen.add(key);
+      out.push(j);
+      if (out.length >= limit) return true;
+    }
+    return false;
+  };
+
+  if (!useMongo) {
+    const jobs = jsonReadJobs().slice().reverse();
+    take(jobs);
+    return out;
+  }
+
+  await connectDB();
+  let cursorId = null;
+  let scanned = 0;
+  while (out.length < limit && scanned < MAX_SCAN) {
+    const filter = { link: { $regex: 'naukri\\.com' } };
+    if (cursorId) filter._id = { $lt: cursorId };
+    const rows = await Job.find(filter, FIELDS).sort({ _id: -1 }).limit(CHUNK).lean();
+    if (!rows.length) break;
+    scanned += rows.length;
+    cursorId = rows[rows.length - 1]._id;
+    if (take(rows)) break;
+  }
+  return out;
+}
+
+// opts.linkContains / opts.fields let a caller that only needs a narrow slice
+// (e.g. naukri-apply only cares about naukri.com links, and only 4 small
+// fields) avoid paying for every job's full `description`/`aiSummary` text —
+// confirmed live that pulling the whole collection (14k+ jobs, most with a
+// few KB of description each) made this single call take 60s+, which in turn
+// made naukri-apply's cron cycle long enough to starve company-portal of the
+// shared browser lock every time. Callers that need everything (e.g. the
+// company-scoped read) are unaffected — opts is optional.
+export async function readJobsRaw(companyId, opts = {}) {
+  const { linkContains, fields } = opts;
+  if (!useMongo) {
+    const jobs = jsonReadJobs();
+    let filtered = companyId ? jobs.filter(j => j.companyId === companyId) : jobs;
+    if (linkContains) filtered = filtered.filter(j => j.link?.includes(linkContains));
+    return sortJobsBySource(filtered);
+  }
+  await connectDB();
+  const filter = companyId ? { companyId } : {};
+  if (linkContains) filter.link = { $regex: linkContains };
+  // linkContains alone doesn't bound the result size — almost every job in
+  // this collection is a naukri.com link, so that filter barely narrows
+  // anything; the limit is what actually caps the fetch (measured taking
+  // 40s+ without it, which starved the shared browser lock on every cycle).
+  let query = Job.find(filter, fields).lean();
+  if (!companyId) query = query.sort({ _id: -1 }).limit(DEFAULT_JOB_LIMIT);
+  const jobs = await query;
+  return sortJobsBySource(jobs);
 }
 
 export async function replaceJobsForCompany(companyId, jobs) {
@@ -429,6 +578,25 @@ export async function readApplied() {
   return AppliedJob.find().lean().sort({ appliedAt: -1 });
 }
 
+// Same numbers readApplied() + a manual .length/group-by would produce, but
+// via a server-side aggregation instead of pulling every applied-job document
+// (1700+ and growing) over the wire just to count them — confirmed live this
+// was a real contributor to /api/status taking 60s+ to respond.
+export async function getAppliedCounts() {
+  if (!useMongo) {
+    const all = jsonReadApplied();
+    const bySource = {};
+    for (const a of all) bySource[a.source || 'unknown'] = (bySource[a.source || 'unknown'] || 0) + 1;
+    return { total: all.length, bySource };
+  }
+  await connectDB();
+  const rows = await AppliedJob.aggregate([{ $group: { _id: '$source', count: { $sum: 1 } } }]);
+  const bySource = {};
+  let total = 0;
+  for (const r of rows) { bySource[r._id || 'unknown'] = r.count; total += r.count; }
+  return { total, bySource };
+}
+
 // ── Skipped Jobs (permanently excluded from Easy Apply retries) ───────────────
 export async function recordSkipped(entries) {
   // entries: [{ link, reason }]
@@ -445,10 +613,53 @@ export async function recordSkipped(entries) {
   for (const entry of entries) {
     await SkippedJob.findOneAndUpdate(
       { link: entry.link },
-      { $setOnInsert: { ...entry, skippedAt: new Date() } },
+      {
+        // Reason and lastAttemptAt track the MOST RECENT outcome (a job that
+        // failed differently this time should be judged on the new reason),
+        // while skippedAt keeps the original sighting and attempts counts how
+        // many times we've burned a slot on it.
+        $set: { reason: entry.reason, lastAttemptAt: new Date() },
+        $setOnInsert: { link: entry.link, skippedAt: new Date() },
+        $inc: { attempts: 1 },
+      },
       { upsert: true }
     ).catch(() => {});
   }
+}
+
+// Skip reasons that describe a TRANSIENT condition rather than a permanent
+// property of the job, mapped to how long to wait before trying again.
+// 'already-applied' and 'company-website' are deliberately absent: those are
+// genuine terminal facts and must stay permanent.
+export const RETRYABLE_SKIP_REASONS = {
+  'no-apply-button': 3,
+  'form-validation-error': 2,
+  'no-submit-button-found': 2,
+  'no-form-fields-found': 7,
+  'job-timed-out': 1,
+  'other': 3,
+};
+const MAX_SKIP_ATTEMPTS = 3;
+
+// Links that should stay out of the apply queue right now. A retryable skip
+// whose cooldown has elapsed and that is still under the attempt ceiling is
+// intentionally NOT included, so it flows back into the queue.
+export async function readActiveSkippedLinks() {
+  const now = Date.now();
+  const eligible = (d) => {
+    const cooldownDays = RETRYABLE_SKIP_REASONS[d.reason];
+    if (cooldownDays === undefined) return false;             // terminal reason — stays skipped
+    if ((d.attempts || 1) >= MAX_SKIP_ATTEMPTS) return false; // exhausted — stays skipped
+    const last = new Date(d.lastAttemptAt || d.skippedAt).getTime();
+    return now - last >= cooldownDays * 86400000;
+  };
+
+  if (!useMongo) {
+    return new Set(jsonReadSkipped().filter(d => !eligible(d)).map(s => s.link));
+  }
+  await connectDB();
+  const docs = await SkippedJob.find({}, 'link reason attempts lastAttemptAt skippedAt').lean();
+  return new Set(docs.filter(d => !eligible(d)).map(d => d.link));
 }
 
 // Jobs the automation couldn't finish but that are still real matches —
@@ -495,6 +706,32 @@ export async function readOutreachContacts() {
   if (!useMongo) return jsonReadOutreach();
   await connectDB();
   return OutreachContact.find().lean().sort({ discoveredAt: -1 });
+}
+
+// Same numbers readOutreachContacts() + manual .filter() counts would give,
+// via a server-side aggregation instead of pulling every contact (4100+ and
+// growing) over the wire just to count statuses.
+export async function getOutreachCounts() {
+  if (!useMongo) {
+    const all = jsonReadOutreach();
+    return {
+      total: all.length,
+      pending: all.filter(c => c.status === 'pending').length,
+      sent: all.filter(c => c.status === 'sent').length,
+      bounced: all.filter(c => c.status === 'bounced').length,
+    };
+  }
+  await connectDB();
+  const rows = await OutreachContact.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]);
+  const byStatus = {};
+  let total = 0;
+  for (const r of rows) { byStatus[r._id || 'unknown'] = r.count; total += r.count; }
+  return {
+    total,
+    pending: byStatus.pending || 0,
+    sent: byStatus.sent || 0,
+    bounced: byStatus.bounced || 0,
+  };
 }
 
 export async function readOutreachEmails() {
@@ -555,6 +792,30 @@ export async function deleteOutreachContact(email) {
   return OutreachContact.deleteOne({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') });
 }
 
+// ── Per-identity outreach settings (daily limit + automatic-sending switch) ──
+export async function readIdentitySettings() {
+  if (!useMongo) return [];
+  await connectDB();
+  return IdentitySettings.find().lean();
+}
+
+export async function getIdentitySettings(identityId) {
+  if (!useMongo) return { identityId, dailyLimit: 150, autoSendEnabled: true };
+  await connectDB();
+  const doc = await IdentitySettings.findOne({ identityId }).lean();
+  return doc || { identityId, dailyLimit: 150, autoSendEnabled: true };
+}
+
+export async function updateIdentitySettings(identityId, update) {
+  if (!useMongo) return null;
+  await connectDB();
+  return IdentitySettings.findOneAndUpdate(
+    { identityId },
+    { $set: update, $setOnInsert: { identityId } },
+    { upsert: true, new: true }
+  ).lean();
+}
+
 // ── Screening-question answer cache ───────────────────────────────────────────
 export async function readAnswerCache() {
   if (!useMongo) {
@@ -613,4 +874,23 @@ export async function addMailInsight(insight) {
   } catch {
     return null; // duplicate messageId
   }
+}
+
+// ── System State (generic key/value, e.g. alert cooldown timestamps) ──────────
+export async function getSystemState(key) {
+  if (!useMongo) return jsonReadSystemState()[key];
+  await connectDB();
+  const doc = await SystemState.findOne({ key }).lean();
+  return doc?.value;
+}
+
+export async function setSystemState(key, value) {
+  if (!useMongo) {
+    const all = jsonReadSystemState();
+    all[key] = value;
+    jsonWriteSystemState(all);
+    return;
+  }
+  await connectDB();
+  await SystemState.findOneAndUpdate({ key }, { $set: { value } }, { upsert: true });
 }

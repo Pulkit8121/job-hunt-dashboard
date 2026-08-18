@@ -16,6 +16,11 @@ const FIELD_RULES = [
   { test: /last\s*name/i, value: () => PROFILE.name.split(' ').slice(1).join(' ') || PROFILE.name.split(' ')[0], kind: 'text' },
   { test: /full\s*name|applicant\s*name|^\s*name\s*$/i, value: () => PROFILE.name, kind: 'text' },
   { test: /e[-\s]?mail/i, value: () => PROFILE.email, kind: 'text' },
+  // Country-code pickers sit next to the phone field and match /phone/ too,
+  // but they want a dial code, not the full number. Measured on a live
+  // Greenhouse form: the phone combobox offers 60 country options, and
+  // feeding it the raw "+91 8299559013" matched none of them.
+  { test: /country code|dial(?:ing)? code|phone.*country|country.*phone/i, value: () => '+91', kind: 'choice' },
   { test: /phone|mobile|contact number/i, value: () => PROFILE.phone, kind: 'text' },
   { test: /notice period/i, value: () => '15 days', kind: 'text' },
   { test: /current (?:ctc|salary|compensation)/i, value: () => '7 LPA', kind: 'text' },
@@ -70,7 +75,15 @@ export function matchChoice(options = [], target = '') {
   }
 
   const declineOpt = options.find(o => /decline|prefer not|choose not|do not wish/i.test(o));
-  return declineOpt || options[0];
+  if (declineOpt) return declineOpt;
+
+  // Falling back to options[0] is only defensible on a short, essentially
+  // binary list where the first option is a coin-flip between Yes and No.
+  // On a long list it is actively harmful: the phone-country picker on a live
+  // Greenhouse form has 60 entries, so an unmatched answer would have
+  // confidently submitted whichever country happened to sort first. Better to
+  // leave the field for a human than to assert something untrue on it.
+  return options.length <= 4 ? options[0] : null;
 }
 
 async function generateOpenEndedAnswer(label, job) {

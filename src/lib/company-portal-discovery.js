@@ -41,6 +41,45 @@ export async function scrapeAshby(slug) {
   }
 }
 
+// ── SmartRecruiters public postings API ─────────────────────────────────────
+// Added because Greenhouse/Lever/Ashby alone covered only 414 of the 5,763
+// tracked companies. SmartRecruiters is the next-largest board with a fully
+// public, unauthenticated postings API and an ordinary HTML application form,
+// so it slots into the existing generic filler with no new apply logic.
+//
+// Workable and Recruitee were evaluated alongside it and deliberately left
+// out: their public endpoints respond, but every board probed returned an
+// empty job list, so a driver for them would be untestable guesswork.
+export async function scrapeSmartRecruiters(slug) {
+  try {
+    const res = await fetch(
+      `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(slug)}/postings?limit=100`,
+      { signal: AbortSignal.timeout(FETCH_TIMEOUT) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.content || [])
+      .filter(j => isRelevantJob(j.name))
+      .slice(0, 80)
+      .map(j => ({
+        title: j.name,
+        jobId: j.id,
+        // The canonical public posting page; the apply form is behind its
+        // Apply control, which ensureApplyForm() already knows how to reach.
+        link: `https://jobs.smartrecruiters.com/${slug}/${j.id}`,
+        location: j.location?.fullLocation
+          || [j.location?.city, j.location?.country].filter(Boolean).join(', ')
+          || 'Unknown',
+        description: '',
+        source: 'careers-page',
+        atsType: 'smartrecruiters',
+        postedDate: j.releasedDate ? j.releasedDate.split('T')[0] : today(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // ── Workday CXS job-listing API — discovery only, no auto-submit (see
 // company-portal-apply route for why). Workday tenant URLs look like
 // https://{tenant}.wd1.myworkdayjobs.com/{site}, and the same page's own
@@ -96,6 +135,7 @@ const ATS_SIGNATURES = [
   { atsType: 'greenhouse', re: /(?:boards|job-boards)\.greenhouse\.io\/([a-z0-9_-]+)/i },
   { atsType: 'lever', re: /jobs\.lever\.co\/([a-z0-9_-]+)/i },
   { atsType: 'ashby', re: /jobs\.ashbyhq\.com\/([a-z0-9_-]+)/i },
+  { atsType: 'smartrecruiters', re: /jobs\.smartrecruiters\.com\/([A-Za-z0-9_-]+)/i },
   { atsType: 'workday', re: WORKDAY_URL_RE },
 ];
 
@@ -139,6 +179,9 @@ export async function discoverAtsJobs(company) {
   }
   if (company.atsType === 'ashby' && company.atsSlug) {
     return scrapeAshby(company.atsSlug);
+  }
+  if (company.atsType === 'smartrecruiters' && company.atsSlug) {
+    return scrapeSmartRecruiters(company.atsSlug);
   }
   if (company.atsType === 'workday' && company.careersUrl) {
     return scrapeWorkdayListings(company.careersUrl);

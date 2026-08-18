@@ -15,23 +15,33 @@ import { PROFILE } from './profile.js';
 import { openNaukriPage, extractNaukriCards } from './naukri.js';
 import { slugifyCompanyId } from './company-utils.js';
 
+// How fresh a listing has to be, in days. Naukri's own search UI exposes this
+// as `jobAge` and it is the highest-leverage filter available here: without
+// it, discovery hoovers up listings that are already months old and expired by
+// the time the apply queue reaches them, which is precisely how 2,287 jobs
+// ended up skipped as "no-apply-button". 15 days keeps volume high while
+// staying inside the window where a listing is still open.
+const DEFAULT_JOB_AGE_DAYS = Number(process.env.NAUKRI_JOB_AGE_DAYS) || 15;
+
 // Naukri paginates by appending -<n> to the search path; page 1 has no suffix.
-export function buildBroadSearchUrl(roleSlug, citySlug, page = 1) {
+export function buildBroadSearchUrl(roleSlug, citySlug, page = 1, jobAgeDays = DEFAULT_JOB_AGE_DAYS) {
   const base = `https://www.naukri.com/${roleSlug}-jobs-in-${citySlug}`;
   const path = page > 1 ? `${base}-${page}` : base;
   const params = new URLSearchParams({
     experience: String(PROFILE.minExperienceYears),
     maxExperience: String(PROFILE.maxExperienceYears),
   });
+  if (jobAgeDays) params.set('jobAge', String(jobAgeDays));
   return `${path}?${params.toString()}`;
 }
 
 // Yields raw job objects tagged with their true posting company.
 // onProgress(msg) for log lines; signal to abort mid-run.
 export async function scrapeNaukriBroad(browser, {
-  roles = PROFILE.scrapeRoles,
+  roles = PROFILE.discoveryRoles,
   cities = PROFILE.preferredCities,
   pagesPerSearch = 5,
+  jobAgeDays = DEFAULT_JOB_AGE_DAYS,
   onProgress = () => {},
   signal,
 } = {}) {
@@ -48,7 +58,7 @@ export async function scrapeNaukriBroad(browser, {
 
         for (let p = 1; p <= pagesPerSearch; p++) {
           if (signal?.aborted) break;
-          const url = buildBroadSearchUrl(role.slug, city.slug, p);
+          const url = buildBroadSearchUrl(role.slug, city.slug, p, jobAgeDays);
           let cards = [];
           try {
             await openNaukriPage(page, url);
@@ -103,6 +113,6 @@ export async function scrapeNaukriBroad(browser, {
     await page.close().catch(() => {});
   }
 
-  onProgress(`ℹ ${searches} role/city search(es) → ${byLink.size} unique listing(s).`);
+  onProgress(`ℹ ${searches} role/city search(es), max ${jobAgeDays}d old → ${byLink.size} unique listing(s).`);
   return Array.from(byLink.values());
 }

@@ -1,4 +1,5 @@
 import { resolveAnswer, PROFILE_ANSWERS } from './naukri-question-agent.js';
+import { fetchJobDetail } from './naukri-jd-api.js';
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -41,8 +42,15 @@ async function withTabCleanup(page, fn) {
     return await fn();
   } finally {
     const after = await browser.pages();
-    for (const p of after) {
-      if (before.has(p) || p === page) continue;
+    const newTabs = after.filter(p => !before.has(p) && p !== page);
+    if (process.env.NAUKRI_DEBUG_SCREENSHOT === 'true' && newTabs.length) {
+      try {
+        const fs = await import('fs');
+        const urls = await Promise.all(newTabs.map(p => p.url().catch(() => '?')));
+        fs.appendFileSync('/tmp/naukri-debug/new-tabs.log', `${new Date().toISOString()} ${JSON.stringify(urls)}\n`);
+      } catch {}
+    }
+    for (const p of newTabs) {
       const url = p.url();
       if (url.includes('naukri.com') || url === 'about:blank') {
         await p.close().catch(() => {});
@@ -799,12 +807,71 @@ export async function captureExternalApplyUrl(page) {
   return found;
 }
 
-// Attempt Naukri Easy Apply for a single job. Returns { success, reason, externalUrl? }
+// Same detection strategy as generic-form-apply.js's hasBlockingCaptcha: only a
+// visibly-RENDERED challenge widget (not just a passive/invisible recaptcha v3
+// script tag) counts as blocking. Confirmed live against Naukri: job pages can
+// come back as a bare reCAPTCHA v2 checkbox page with no job content at all —
+// that's not a selector bug, there's no apply button because there's no job
+// page. We only detect and report this; we do not attempt to solve it.
+async function detectNaukriCaptcha(page) {
+  return page.evaluate(() => {
+    const isVisible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 10 && r.height > 10 &&
+             s.visibility !== 'hidden' && s.display !== 'none' && el.offsetParent !== null;
+    };
+    const widgets = [...document.querySelectorAll(
+      'iframe[src*="recaptcha/api2/anchor" i], iframe[src*="recaptcha/api2/bframe" i],' +
+      'iframe[title*="recaptcha challenge" i], iframe[src*="hcaptcha.com" i],' +
+      'iframe[title*="hcaptcha" i], iframe[src*="challenges.cloudflare.com" i],' +
+      'div.g-recaptcha, div.h-captcha, div.cf-turnstile'
+    )];
+    if (widgets.some(isVisible)) return true;
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    return /just a moment|checking your browser|attention required|verify you are human|check the box to let us know you.?re human|unusual traffic|are you a robot/i.test(
+      `${document.title} ${bodyText}`
+    );
+  }).catch(() => false);
+}
+
+// Attempt Naukri Easy Apply for a single job. Returns { success, reason, externalUrl?, captchaBlocked? }
 export async function naukriEasyApply(page, job, signal, ctx) {
   try {
     await prepareNaukriPage(page);
-    await page.goto(job.link, { waitUntil: 'domcontentloaded', timeout: 25000 });
+
+    // Pre-flight against Naukri's own JD API before paying for a navigation.
+    // Requires an already-loaded naukri.com origin to inherit cookies from; on
+    // the first job of a run the page may still be blank, in which case this
+    // simply reports "unknown" and the normal flow continues untouched.
+    if (/naukri\.com/i.test(page.url())) {
+      const detail = await fetchJobDetail(page, job.link).catch(() => null);
+      if (detail?.expired) {
+        // This is what "No Apply button found" actually was, 2,287 times over.
+        // Naming it correctly means the retry policy can treat it as the
+        // permanent fact it is instead of re-queueing it forever.
+        return { success: false, reason: 'Listing expired on Naukri', expired: true };
+      }
+      if (detail?.externalUrl) {
+        // Recovered without having to click the JS-handler button and win a
+        // navigation race — hand it straight to the company-portal flow.
+        return {
+          success: false,
+          reason: 'Apply on company website — skip',
+          externalUrl: detail.externalUrl,
+        };
+      }
+    }
+
+    // 25s was too tight for this 1-core server under load — bumped to 45s so a
+    // slow-but-alive page load doesn't get thrown away as a hard failure.
+    await page.goto(job.link, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await new Promise(r => setTimeout(r, 2000));
+
+    if (await detectNaukriCaptcha(page)) {
+      return { success: false, reason: 'Naukri CAPTCHA challenge — needs manual solve', captchaBlocked: true };
+    }
 
     // Check for "Apply on Company Website" — confirmed ID: #company-site-button
     const externalUrl = await page.evaluate(() => {
@@ -856,27 +923,75 @@ export async function naukriEasyApply(page, job, signal, ctx) {
     // Wrapped in withTabCleanup: some Apply buttons ignore the window.open override
     // (e.g. real target="_blank" anchors added after the page loaded) and still
     // spawn a stray tab — close it immediately rather than let it accumulate.
+    //
+    // Naukri now renders a DUPLICATE #apply-button in a sticky header clone
+    // (same id, same text, appears once you'd have scrolled) — picking it by
+    // text alone risked matching the wrong copy. And a synthetic el.click()
+    // fired from page.evaluate() is untrusted (isTrusted: false); Naukri's
+    // handler appears to silently ignore that now — every job was reporting
+    // "no visible effect" even though nothing else about the flow changed.
+    // Fix: tag ONLY the first visible match in-page, then click it for real
+    // through Puppeteer (a genuine, trusted mouse event) instead of JS .click().
     const urlBeforeClick = page.url();
-    const clicked = await withTabCleanup(page, () => page.evaluate(() => {
-      // Primary: find by exact text 'Apply' or 'Easy Apply' (XPath-style text match)
+    const tagResult = await page.evaluate(() => {
+      const isVisible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      };
       const allEls = Array.from(document.querySelectorAll('button, a, [class*="applyBtn"], [class*="apply-btn"]'));
       const SKIP = ['company website', 'company site', 'external', 'login', 'register', 'sign in'];
       const TARGET = ['easy apply', 'apply now', 'apply'];
 
-      // Exact text match first (most reliable)
+      const tag = (el, t) => { el.setAttribute('data-naukri-apply-target', 'true'); return t; };
+
       for (const el of allEls) {
         const t = (el.textContent || '').trim().toLowerCase();
-        if (SKIP.some(s => t.includes(s))) continue;
-        if (t === 'apply' || t === 'easy apply') { el.click(); return t; }
+        if (SKIP.some(s => t.includes(s)) || !isVisible(el)) continue;
+        if (t === 'apply' || t === 'easy apply') return tag(el, t);
       }
-      // Startswith match
       for (const el of allEls) {
         const t = (el.textContent || '').trim().toLowerCase();
-        if (SKIP.some(s => t.includes(s))) continue;
-        if (TARGET.some(p => t.startsWith(p))) { el.click(); return t; }
+        if (SKIP.some(s => t.includes(s)) || !isVisible(el)) continue;
+        if (TARGET.some(p => t.startsWith(p))) return tag(el, t);
       }
       return null;
-    }));
+    }).catch(() => null);
+
+    let clicked = null;
+    // Captures the actual apply-workflow API response — this is what actually
+    // decides success/failure. Confirmed by direct network inspection: the
+    // click was firing correctly, but Naukri was returning a 403 "Daily quota
+    // of jobs exceeded" that the old DOM-only detection had no way to see, so
+    // it silently reported a generic "no visible effect" for every single job
+    // instead of the real, distinct, stop-the-run reason.
+    let applyResponse = null;
+    const onApplyResponse = async (res) => {
+      if (!/workflow-services\/apply-workflow/i.test(res.url())) return;
+      let body = null;
+      try { body = await res.text(); } catch {}
+      applyResponse = { status: res.status(), body };
+    };
+    page.on('response', onApplyResponse);
+
+    if (tagResult) {
+      clicked = await withTabCleanup(page, async () => {
+        const handle = await page.$('[data-naukri-apply-target="true"]');
+        if (!handle) return null;
+        try {
+          await handle.scrollIntoView().catch(() => {});
+          await handle.click({ delay: 30 });
+          return tagResult;
+        } catch {
+          // Real click failed (covered element, detached, etc.) — fall back to
+          // the synthetic click rather than losing the attempt entirely.
+          await page.evaluate((el) => el.click(), handle).catch(() => {});
+          return tagResult;
+        } finally {
+          await handle.dispose();
+        }
+      });
+    }
     if (!clicked) return { success: false, reason: 'No Apply button found' };
 
     // Most jobs apply instantly: clicking Apply navigates to a confirmation page
@@ -907,6 +1022,18 @@ export async function naukriEasyApply(page, job, signal, ctx) {
       await new Promise(r => setTimeout(r, 1200));
     }
 
+    page.off('response', onApplyResponse);
+
+    // A 403 here means Naukri itself has cut this account off for the day —
+    // confirmed via direct network inspection: the click was firing
+    // correctly, but every attempt got "Daily quota of jobs exceeded" back,
+    // which the old DOM-only detection had no way to see and just reported as
+    // a generic, retryable "no visible effect" — burning through the entire
+    // remaining queue against a wall instead of stopping once, cleanly.
+    if (applyResponse?.status === 403 && /quota/i.test(applyResponse.body || '')) {
+      return { success: false, reason: 'Naukri daily apply quota exceeded', quotaExceeded: true };
+    }
+
     if (!sawChatbot) {
       const s = await detectState();
       if (s.instantApplied) return { success: true, reason: 'Applied (instant)' };
@@ -917,13 +1044,33 @@ export async function naukriEasyApply(page, job, signal, ctx) {
       // demonstrably changed something (URL moved, or the Apply button is gone /
       // replaced by an applied-state indicator); otherwise report a distinct,
       // retryable failure instead of a false positive.
+      // Check the SPECIFIC button we tagged and clicked, not "any apply-text
+      // element anywhere" — Naukri renders a duplicate #apply-button in a
+      // sticky header clone, so a sitewide check always finds one and never
+      // reports the click as having worked.
       const effectSeen = await page.evaluate((before) => {
         if (location.href !== before) return true;
-        const stillHasApply = Array.from(document.querySelectorAll('button, a'))
-          .some(el => /^(apply|easy apply)$/i.test((el.textContent || '').trim()));
-        return !stillHasApply;
+        const target = document.querySelector('[data-naukri-apply-target="true"]');
+        if (!target) return true; // gone/replaced — the click did something
+        const t = (target.textContent || '').trim().toLowerCase();
+        const disabled = target.disabled || target.getAttribute('aria-disabled') === 'true';
+        return disabled || (t !== 'apply' && t !== 'easy apply');
       }, urlBeforeClick).catch(() => false);
       if (effectSeen) return { success: true, reason: 'Submitted (verify on Naukri profile)' };
+
+      if (process.env.NAUKRI_DEBUG_SCREENSHOT === 'true') {
+        try {
+          const fs = await import('fs');
+          const dir = '/tmp/naukri-debug';
+          fs.mkdirSync(dir, { recursive: true });
+          const stamp = Date.now();
+          await page.screenshot({ path: `${dir}/${stamp}.png`, fullPage: false }).catch(() => {});
+          const html = await page.content().catch(() => '');
+          fs.writeFileSync(`${dir}/${stamp}.html`, html);
+          fs.writeFileSync(`${dir}/${stamp}-apply-response.json`, JSON.stringify(applyResponse, null, 2));
+        } catch {}
+      }
+
       return { success: false, reason: 'Apply click had no visible effect — retrying next run' };
     }
 
@@ -966,7 +1113,12 @@ export async function naukriEasyApply(page, job, signal, ctx) {
     }
 
     // Final success check — only claim success on an explicit confirmation.
-    const finalState = await detectState();
+    // Confirmation can lag a beat behind the last answer's animation, so give
+    // it one more real chance before giving up.
+    let finalState = await detectState();
+    if (finalState.instantApplied) return { success: true, reason: 'Applied via chatbot' };
+    await new Promise(r => setTimeout(r, 3000));
+    finalState = await detectState();
     if (finalState.instantApplied) return { success: true, reason: 'Applied via chatbot' };
     return { success: false, reason: 'Chatbot ended without a confirmation' };
   } catch (e) {

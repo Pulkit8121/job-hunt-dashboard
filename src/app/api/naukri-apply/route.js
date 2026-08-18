@@ -1,11 +1,12 @@
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
-import { readJobs, readCompanies, recordApplied, updateJob, recordSkipped, readSkippedLinks, readAnswerCache, saveAnswer } from '@/lib/db';
+import { readCompanies, recordApplied, updateJob, recordSkipped, readActiveSkippedLinks, readNaukriApplyQueue, readAnswerCache, saveAnswer } from '@/lib/db';
 import { naukriLogin, naukriEasyApply } from '@/lib/naukri';
 import { getBrowser, getReusablePage, closeBrowserSafely } from '@/lib/browser';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { startRun, finishRun, isRunning } from '@/lib/naukriRunState';
+import { alertCaptchaBlocked } from '@/lib/captcha-alert';
 
 export async function POST(request) {
   const email    = process.env.NAUKRI_EMAIL;
@@ -27,39 +28,54 @@ export async function POST(request) {
   const controller = startRun();
   const signal = controller.signal;
 
+  // A client that gives up (curl --max-time from the cron script, closed tab)
+  // used to leave this loop running forever server-side — isRunning() stays
+  // true with nothing able to clear it, so every later cron tick just gets
+  // "already in progress" while the orphaned run holds the shared browser
+  // lock indefinitely. Same fix as /api/scrape: tie the incoming request's
+  // own abort signal to this run's controller.
+  request.signal?.addEventListener?.('abort', () => controller.abort());
+
   (async () => {
     let browser;
     let connected = false;
 
     try {
-      const allJobs = await readJobs();
       const companies = await readCompanies();
       const companyMap = Object.fromEntries(companies.map(c => [c.id, c.name]));
 
-      // Load permanently skipped links (company website, no button, etc.)
-      const skippedLinks = await readSkippedLinks();
+      // Links still barred from the queue. Unlike the old readSkippedLinks(),
+      // this releases transient skips (no-apply-button, form errors) once
+      // their cooldown has elapsed — see RETRYABLE_SKIP_REASONS in db.js.
+      const skippedLinks = await readActiveSkippedLinks();
 
       // Freelance-client companies to never apply to
       const excluded = getExcludedCompanies();
       let excludedCount = 0;
 
-      // All jobs with a naukri.com link — deduplicated, excluding already-skipped
-      // and excluding freelance-client companies (matched by company name).
-      const seenLinks = new Set();
-      const targets = allJobs.filter(j => {
-        if (!j.link?.includes('naukri.com')) return false;
-        const key = j.link.split('?')[0];
-        if (seenLinks.has(key) || skippedLinks.has(key)) return false;
+      // Paged, skip-aware queue build. The previous version fetched only the
+      // newest 500 job documents and THEN removed skipped links — with every
+      // link in that window already carrying a tombstone, the target list came
+      // back empty on every single run. This scans past the tombstones until
+      // it has a real queue. maxAgeDays keeps the browser off listings that
+      // Naukri has almost certainly already expired.
+      const MAX_AGE_DAYS = Number(process.env.NAUKRI_MAX_JOB_AGE_DAYS) || 30;
+      const queue = await readNaukriApplyQueue({
+        limit: Number(process.env.NAUKRI_QUEUE_SIZE) || 300,
+        skippedLinks,
+        maxAgeDays: MAX_AGE_DAYS,
+      });
+
+      const targets = queue.filter(j => {
         const companyName = companyMap[j.companyId] || j.companyId || '';
         if (isExcludedCompany(companyName, excluded) || isExcludedCompany(j.title, excluded)) {
           excludedCount++;
           return false;
         }
-        seenLinks.add(key);
         return true;
       });
 
-      await send(`ℹ ${skippedLinks.size} previously skipped + ${excludedCount} excluded-client jobs removed. ${targets.length} remaining to attempt.`);
+      await send(`ℹ Naukri auto-apply: ${skippedLinks.size} link(s) currently barred, ${excludedCount} excluded-client job(s) dropped. ${targets.length} job(s) queued (newest first, max ${MAX_AGE_DAYS}d old).`);
 
       if (!targets.length) {
         await send('⚠ No Naukri jobs found. Click "Refresh All" or "Agent Scan" first, then retry.');
@@ -123,6 +139,8 @@ export async function POST(request) {
 
       let applied = 0;
       let failed  = 0;
+      let reachedQuota = false;
+      let captchaBlocked = false;
       const appliedEntries = [];
       const skippedEntries = [];
 
@@ -145,7 +163,17 @@ export async function POST(request) {
 
         const companyName = companyMap[job.companyId] || job.companyId;
         await send(`⚡ Applying: ${job.title} at ${companyName}...`);
-        const result = await naukriEasyApply(workPage, job, signal, agentCtx);
+        let result = await naukriEasyApply(workPage, job, signal, agentCtx);
+
+        // Most real failures are transient (Puppeteer navigation timeouts,
+        // "Target closed" / "Execution context destroyed" — the 1-core server
+        // under load, not a genuinely bad job). One immediate retry on a fresh
+        // page recovers most of these instead of waiting for the next 4h cron.
+        if (!result.success && !result.externalUrl && /timeout|target closed|execution context|protocol error|detached frame/i.test(result.reason || '') && !signal.aborted) {
+          await send(`  ↻ Transient error (${result.reason}) — retrying once...`);
+          await new Promise(r => setTimeout(r, 2000));
+          result = await naukriEasyApply(workPage, job, signal, agentCtx);
+        }
 
         if (result.success) {
           applied++;
@@ -176,16 +204,48 @@ export async function POST(request) {
           } else if (result.reason === 'Apply on company website — skip') {
             skippedEntries.push({ link: linkKey, reason: 'company-website' });
             await send(`↗ Company website job: ${job.title} — link saved`);
+          } else if (result.expired) {
+            // A genuinely terminal fact (not in RETRYABLE_SKIP_REASONS), unlike
+            // the generic 'no-apply-button' this used to be misfiled as.
+            skippedEntries.push({ link: linkKey, reason: 'expired' });
+            await send(`⌛ Expired listing: ${job.title}`);
           } else if (result.reason === 'No Apply button found') {
             skippedEntries.push({ link: linkKey, reason: 'no-apply-button' });
             await send(`✗ No Apply button: ${job.title}`);
           } else if (result.reason === 'Screening question needs a human answer') {
             skippedEntries.push({ link: linkKey, reason: 'needs-human-answer' });
             await send(`🙋 ${job.title}: a screening question needs your answer — skipped for manual apply.`);
+          } else if (result.quotaExceeded) {
+            // Naukri itself has cut this account off for today — every remaining
+            // job would fail identically, so stop now instead of burning the
+            // whole queue against it. Not added to skippedLinks: these are real,
+            // otherwise-viable jobs to retry once the quota resets.
+            await send(`⛔ Naukri's daily apply quota is exhausted for this account — stopping this run. Will resume once it resets.`);
+            reachedQuota = true;
+          } else if (result.captchaBlocked) {
+            // Every remaining job would hit the same CAPTCHA wall — stop now
+            // rather than burn the queue against it. Not added to skippedLinks:
+            // this job is fine, retry it once the challenge clears.
+            await send(`⛔ Naukri is showing a CAPTCHA challenge — stopping this run.`);
+            await alertCaptchaBlocked({ site: 'naukri.com', blockedUrl: job.link, onProgress: send });
+            captchaBlocked = true;
           } else {
+            // Any other failure ("Chatbot ended without a confirmation", a raw
+            // exception message, etc.) used to fall through without ever being
+            // added to skippedLinks — confirmed live: with the queue's first
+            // job hitting one of these every time, it got retried at the FRONT
+            // of the list on every single 5-minute cron cycle forever, and the
+            // 240s per-cycle time cap meant the other 125+ queued jobs were
+            // never even reached. Recording it here trades away a same-page
+            // retry chance for guaranteed forward progress through the rest of
+            // the queue, which given the alternative (permanent 0% throughput
+            // past whichever job fails first) is the right tradeoff.
+            skippedEntries.push({ link: linkKey, reason: 'other' });
             await send(`✗ Skipped: ${job.title} — ${result.reason}`);
           }
         }
+
+        if (reachedQuota || captchaBlocked) break;
 
         // Checkpoint every 25 — save applied + skipped so crashes don't lose progress
         if ((appliedEntries.length + skippedEntries.length) % 25 === 0) {
@@ -205,6 +265,10 @@ export async function POST(request) {
       if (skippedEntries.length) await recordSkipped(skippedEntries);
       if (signal.aborted) {
         await send(`STOPPED: Applied to ${applied} jobs before stopping. ${failed} skipped/saved.`);
+      } else if (reachedQuota) {
+        await send(`DONE: Applied to ${applied} jobs before hitting Naukri's daily quota. ${failed} skipped/saved this run.`);
+      } else if (captchaBlocked) {
+        await send(`DONE: Applied to ${applied} jobs before hitting a CAPTCHA challenge. ${failed} skipped/saved this run.`);
       } else {
         await send(`DONE: Applied to ${applied} jobs. ${failed} skipped/saved. ${aiAnswerCount} new screening answer(s) learned and cached. Next run will skip those ${failed} automatically.`);
       }

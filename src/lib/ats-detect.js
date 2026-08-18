@@ -11,7 +11,7 @@
 // sit behind an invisible reCAPTCHA that our automation correctly refuses to
 // work around, so a Greenhouse tag yields discoverable-but-unappliable jobs.
 import { scrapeGreenhouse, scrapeLever } from './scraper.js';
-import { scrapeAshby } from './company-portal-discovery.js';
+import { scrapeAshby, scrapeSmartRecruiters } from './company-portal-discovery.js';
 
 const UA = 'Mozilla/5.0 (compatible; JobHuntBot/1.0; personal job-search tool)';
 const TIMEOUT = 12000;
@@ -64,9 +64,23 @@ async function boardBelongsTo(atsType, slug, companyName) {
     } catch {}
   }
 
+  // SmartRecruiters echoes the company's own display name on every posting,
+  // which is a stronger ownership signal than a page <title> and needs no
+  // extra request beyond the one the probe already makes.
+  if (atsType === 'smartrecruiters') {
+    try {
+      const res = await fetch(`https://api.smartrecruiters.com/v1/companies/${slug}/postings?limit=1`, { signal: AbortSignal.timeout(TIMEOUT) });
+      if (res.ok) {
+        const body = await res.json();
+        if (nameMatches(body?.content?.[0]?.company?.name)) return true;
+      }
+    } catch {}
+  }
+
   // Otherwise (and as a Greenhouse fallback) read the public board page title.
   const pageUrl = atsType === 'lever' ? `https://jobs.lever.co/${slug}`
     : atsType === 'ashby' ? `https://jobs.ashbyhq.com/${slug}`
+    : atsType === 'smartrecruiters' ? `https://jobs.smartrecruiters.com/${slug}`
     : `https://job-boards.greenhouse.io/${slug}`;
   try {
     const res = await fetch(pageUrl, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(TIMEOUT) });
@@ -104,6 +118,13 @@ const PROBES = {
     const data = await res.json();
     return (data?.jobs || []).length;
   },
+  smartrecruiters: async (slug) => {
+    const res = await fetch(`https://api.smartrecruiters.com/v1/companies/${slug}/postings?limit=1`, { signal: AbortSignal.timeout(TIMEOUT) });
+    if (!res.ok) return 0;
+    const data = await res.json();
+    // totalFound is the board-wide count; `content` is just this page of it.
+    return Number(data?.totalFound) || (data?.content || []).length;
+  },
 };
 
 // Kept for callers that want the role-filtered counts after detection.
@@ -111,11 +132,12 @@ const FETCHERS = {
   lever: scrapeLever,
   ashby: scrapeAshby,
   greenhouse: scrapeGreenhouse,
+  smartrecruiters: scrapeSmartRecruiters,
 };
 
 // Returns { atsType, atsSlug, jobCount } or null.
 // Order matters: Lever/Ashby first because those are actually appliable.
-export async function detectAtsForCompany(company, { order = ['lever', 'ashby', 'greenhouse'] } = {}) {
+export async function detectAtsForCompany(company, { order = ['lever', 'ashby', 'smartrecruiters', 'greenhouse'] } = {}) {
   const name = company.name || '';
   const candidates = slugCandidates(name);
   if (!candidates.length) return null;

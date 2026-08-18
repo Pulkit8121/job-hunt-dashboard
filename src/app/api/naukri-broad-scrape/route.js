@@ -3,7 +3,6 @@ export const dynamic = 'force-dynamic';
 
 import { readCompanies, addCompany, upsertJobsByLink, readSkippedLinks, readApplied } from '@/lib/db';
 import { scrapeNaukriBroad } from '@/lib/naukri-broad-search';
-import { filterEligibleJobs } from '@/lib/matcher';
 import { analyzeJob } from '@/lib/ai';
 import { buildCompanyRecord } from '@/lib/company-utils';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
@@ -11,7 +10,7 @@ import { getBrowser, closeBrowserSafely } from '@/lib/browser';
 import { startRun, finishRun, isRunning } from '@/lib/naukriBroadRunState';
 
 export async function POST(request) {
-  const { pagesPerSearch = 5 } = await request.json().catch(() => ({}));
+  const { pagesPerSearch = 5, jobAgeDays } = await request.json().catch(() => ({}));
 
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
@@ -42,6 +41,7 @@ export async function POST(request) {
       await send(`🔎 Broad search: ${pagesPerSearch} page(s) per role/city combination...`);
       const raw = await scrapeNaukriBroad(browser, {
         pagesPerSearch,
+        ...(jobAgeDays === undefined ? {} : { jobAgeDays }),
         onProgress: send,
         signal,
       });
@@ -51,15 +51,12 @@ export async function POST(request) {
         return;
       }
 
-      // Same eligibility gate as the per-company flow (title / experience /
-      // India location), so nothing gets in that the apply step would reject.
-      const { eligible, excluded } = filterEligibleJobs(raw, Number.MAX_SAFE_INTEGER);
-      await send(`ℹ ${eligible.length} eligible after filtering (dropped ${excluded.title} title, ${excluded.location} location, ${excluded.experience} experience).`);
+      await send(`ℹ Broad scrape captured ${raw.length} raw Naukri listing(s) with no role-fit filtering.`);
 
       // Drop anything already attempted so the "new" count is honest.
       const skipped = await readSkippedLinks();
       const appliedLinks = new Set((await readApplied()).map(a => a.jobLink));
-      const untried = eligible.filter(j => {
+      const untried = raw.filter(j => {
         const k = (j.link || '').split('?')[0];
         return k && !skipped.has(k) && !appliedLinks.has(j.link) && !appliedLinks.has(k);
       });
