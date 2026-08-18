@@ -75,6 +75,11 @@ async function runOutreachBranch() {
 }
 
 async function runCompanyPortalBranch() {
+  // The daily run only refills the queue and drains one batch. Sustained
+  // volume comes from scripts/run-portal-apply-tick.mjs on a short cron —
+  // a single daily pass cannot work through a ~15,900-posting queue.
+  await runSseTask('/api/portal-queue/refresh', {}, 'portal-queue-refresh');
+  await sleep(1000);
   await runSseTask('/api/company-portal-apply', {}, 'company-portal-apply');
 }
 

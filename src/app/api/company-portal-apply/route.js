@@ -3,9 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import os from 'os';
 
-import { readCompanies, recordApplied, recordSkipped, readActiveSkippedLinks, readApplied, readLiveBoards } from '@/lib/db';
-import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
-import { discoverAtsJobs } from '@/lib/company-portal-discovery';
+import { recordApplied, recordSkipped, claimPortalJobs, markPortalJob, releaseStalePortalJobs, portalQueueStats, countAppliedToday } from '@/lib/db';
 import { applyToPortalJob } from '@/lib/generic-form-apply';
 import { getBrowser, closeBrowserSafely } from '@/lib/browser';
 import { startRun, finishRun, isRunning } from '@/lib/companyPortalRunState';
@@ -62,6 +60,7 @@ async function mapWithConcurrency(items, limit, fn) {
 }
 
 export async function POST(request) {
+  const reqBody = await request.json().catch(() => ({}));
   const encoder = new TextEncoder();
   const stream  = new TransformStream();
   const writer  = stream.writable.getWriter();
@@ -90,57 +89,37 @@ export async function POST(request) {
     let connected = false;
 
     try {
-      const companies = await readCompanies();
-      const excluded = getExcludedCompanies();
-      // Retry-aware, like the Naukri queue: a job skipped for a form error the
-      // filler has since learned to handle (custom comboboxes, multi-step
-      // wizards) comes back after its cooldown instead of being written off.
-      const skippedLinks = await readActiveSkippedLinks();
-      const appliedLinks = new Set((await readApplied()).map(a => a.jobLink));
+      // Continuous mode. This route is now a fast queue DRAINER rather than a
+      // discovery sweep. It used to fetch every live board before submitting
+      // anything: measured at 52ms/board across 13,385 boards that is 11.6
+      // minutes of discovery before the first application — 78% of a
+      // 15-minute cycle. /api/portal-queue/refresh fills the queue on a slow
+      // cadence; this drains it on a fast one, so a tick starts submitting
+      // within seconds and can safely run every few minutes.
+      const batchSize = Number(reqBody.batchSize) || Number(process.env.PORTAL_APPLY_BATCH) || 60;
+      const dailyCap  = Number(reqBody.dailyCap)  || Number(process.env.PORTAL_DAILY_CAP)  || 2000;
 
-      // ATS discovery (slug-guessing + board-ownership verification) now runs on
-      // its own cron (/api/ats-sweep) instead of inline here — that sequential
-      // per-company fetch loop (up to 500+ companies, 15s timeout each) could
-      // block this run's very first apply for the better part of an hour, which
-      // is exactly why runs looked "stopped": they were still stuck discovering,
-      // never got to applying before the request timed out.
+      const released = await releaseStalePortalJobs({ olderThanMinutes: 30 });
+      if (released) await send(`↻ Returned ${released} stalled job(s) to pending.`);
 
-      // Boards come from the ATS directory (see lib/ats-directory.js), not from
-      // the company list. Deriving boards from tracked companies yielded 414;
-      // enumerating the ATS universe directly and probing for liveness yields
-      // 9,936, and 95% of those were boards the company-driven path had never
-      // seen. Company records are still consulted so per-company exclusions
-      // keep working, but they no longer bound the universe.
-      const boards = await readLiveBoards({ atsTypes: AUTO_SUBMIT_ATS });
-      const companyNameBySlug = new Map(
-        companies.filter(c => c.atsSlug).map(c => [`${c.atsType}/${c.atsSlug}`, { id: c.id, name: c.name }])
-      );
-
-      // Greenhouse last: its job pages sit behind an invisible reCAPTCHA that
-      // we abort on, so spending the run's early time elsewhere is strictly
-      // better. The rest are ordered by how cleanly they submitted in testing.
-      const atsPriority = { lever: 0, ashby: 1, workable: 2, breezy: 3, recruitee: 4, teamtailor: 5, greenhouse: 6 };
-      const targets = boards
-        .map(b => {
-          const known = companyNameBySlug.get(`${b.atsType}/${b.slug}`);
-          return {
-            id: known?.id || `${b.atsType}-${b.slug}`,
-            name: known?.name || b.name || b.slug,
-            atsType: b.atsType,
-            atsSlug: b.slug,
-          };
-        })
-        .filter(c => !isExcludedCompany(c.name, excluded))
-        .sort((a, b) => (atsPriority[a.atsType] ?? 9) - (atsPriority[b.atsType] ?? 9));
-
-      const discoverOnlyCount = companies.filter(c => DISCOVER_ONLY_ATS.includes(c.atsType)).length;
-
-      await send(`ℹ ${targets.length} live board(s) across ${AUTO_SUBMIT_ATS.length} ATS platforms${discoverOnlyCount ? `; ${discoverOnlyCount} Workday/SmartRecruiters companies are discovered but not auto-submitted` : ''}. Apply concurrency ${APPLY_CONCURRENCY} (${os.cpus()?.length || '?'} cores).`);
-
-      if (!targets.length) {
-        await send('DONE: No live ATS boards known yet. Run POST /api/ats-boards/sync first — it ingests the public board directory and probes each board for liveness.');
+      // Applications are irreversible, so the cap is measured against what was
+      // actually recorded today, not a per-run counter that resets each tick.
+      const alreadyToday = await countAppliedToday('company-portal');
+      const remainingToday = Math.max(0, dailyCap - alreadyToday);
+      if (!remainingToday) {
+        const st = await portalQueueStats();
+        await send(`DONE: daily cap reached — ${alreadyToday}/${dailyCap} already submitted today. ${st.pending} still queued.`);
         return;
       }
+
+      const claimed = await claimPortalJobs(Math.min(batchSize, remainingToday));
+      if (!claimed.length) {
+        const st = await portalQueueStats();
+        await send(`DONE: queue empty (${st.applied} applied, ${st.skipped} skipped all-time). Run POST /api/portal-queue/refresh to discover more.`);
+        return;
+      }
+
+      await send(`ℹ ${claimed.length} job(s) claimed · ${alreadyToday}/${dailyCap} applied today · concurrency ${APPLY_CONCURRENCY} (${os.cpus()?.length || '?'} cores).`);
 
       ({ browser, connected } = await getBrowser({
         headless: process.env.APPLY_HEADLESS === 'true',
@@ -150,95 +129,63 @@ export async function POST(request) {
 
       let applied = 0;
       let skipped = 0;
-      let discovered = 0;
       const appliedEntries = [];
       const skippedEntries = [];
 
-      // ── Phase 1: discover every board in parallel ────────────────────────
-      // Previously discovery and applying were interleaved in one sequential
-      // walk, so a slow board held up applications and a board with nothing
-      // open still cost its full round-trip before the next one started.
-      // Splitting them means the apply pool starts with the whole work-list
-      // and never idles waiting on a fetch.
-      await send(`🔎 Discovering open roles across ${targets.length} board(s)...`);
-      const queue = [];
-      await mapWithConcurrency(targets, DISCOVER_CONCURRENCY, async (company) => {
-        if (signal.aborted) return;
-        let jobs = [];
-        try {
-          jobs = await discoverAtsJobs(company);
-        } catch (e) {
-          await send(`⚠ ${company.name}: discovery failed — ${e.message}`);
-          return;
-        }
-        // No eligibility filtering — apply to every posting a tracked company
-        // has open, not just ones that look like an exact-level match.
-        discovered += jobs.length;
-        for (const job of jobs) {
-          const linkKey = (job.link || '').split('?')[0];
-          if (!linkKey || skippedLinks.has(linkKey) || appliedLinks.has(job.link)) continue;
-          // Guard against the same posting arriving from two company records
-          // that resolved to the same board slug.
-          if (queue.some(q => q.linkKey === linkKey)) continue;
-          queue.push({ linkKey, job, company });
-        }
-      });
-
-      await send(`📋 ${discovered} posting(s) on those boards; ${queue.length} not yet attempted. Applying ${APPLY_CONCURRENCY} at a time...`);
-
-      // ── Phase 2: apply with a bounded pool of concurrent tabs ────────────
       const flush = async () => {
-        if (appliedEntries.length) { await recordApplied(appliedEntries.splice(0)).catch(() => {}); }
-        if (skippedEntries.length) { await recordSkipped(skippedEntries.splice(0)).catch(() => {}); }
+        if (appliedEntries.length) await recordApplied(appliedEntries.splice(0)).catch(() => {});
+        if (skippedEntries.length) await recordSkipped(skippedEntries.splice(0)).catch(() => {});
       };
 
-      await mapWithConcurrency(queue, APPLY_CONCURRENCY, async ({ linkKey, job, company }) => {
+      await mapWithConcurrency(claimed, APPLY_CONCURRENCY, async (job) => {
         if (signal.aborted) return;
 
-        await send(`⚡ Applying: ${job.title} at ${company.name} (${company.atsType})...`);
-        // Belt-and-suspenders: applyToPortalJob has its own internal timeouts,
-        // but a single stuck job (e.g. a hung network call inside it) must
-        // never be able to block the whole pool.
+        await send(`⚡ Applying: ${job.title} at ${job.companyName} (${job.atsType})...`);
         const result = await Promise.race([
-          applyToPortalJob(browser, { ...job, companyName: company.name }),
+          applyToPortalJob(browser, {
+            link: job.link,
+            title: job.title,
+            atsType: job.atsType,
+            companyName: job.companyName,
+            location: job.location,
+          }),
           new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'job-timed-out' }), 120000)),
         ]);
 
         if (result.success) {
           applied++;
-          appliedLinks.add(job.link);
+          await markPortalJob(job.link, 'applied', result.reason);
           appliedEntries.push({
-            companyId: company.id,
-            companyName: company.name,
+            companyId: job.companyId,
+            companyName: job.companyName,
             jobTitle: job.title,
             jobLink: job.link,
             source: 'company-portal',
           });
-          await send(`✓ Applied: ${job.title} at ${company.name} (${result.reason})`);
+          await send(`✓ Applied: ${job.title} at ${job.companyName} (${result.reason})`);
         } else {
           skipped++;
-          skippedLinks.add(linkKey);
-          skippedEntries.push({ link: linkKey, reason: result.reason });
+          await markPortalJob(job.link, 'skipped', result.reason);
+          skippedEntries.push({ link: job.link, reason: result.reason });
           const note = result.captcha ? ' — needs manual completion (CAPTCHA)' : '';
-          await send(`○ Skipped: ${job.title} at ${company.name} — ${result.reason}${note}`);
+          await send(`○ Skipped: ${job.title} at ${job.companyName} — ${result.reason}${note}`);
         }
 
         if (appliedEntries.length + skippedEntries.length >= 20) {
           await flush();
-          await send(`💾 Checkpoint: ${applied} applied, ${skipped} skipped of ${queue.length}`);
+          await send(`💾 Checkpoint: ${applied} applied, ${skipped} skipped of ${claimed.length}`);
         }
 
-        // Per-worker jitter. With a pool this staggers the tabs against each
-        // other instead of letting them march in lockstep at the same ATS.
         await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
       });
 
       await flush();
 
+      const st = await portalQueueStats();
       if (signal.aborted) {
-        await send(`STOPPED: Applied to ${applied} job(s) before stopping. ${skipped} skipped.`);
+        await send(`STOPPED: applied ${applied}, skipped ${skipped} before stopping. ${st.pending} still queued.`);
       } else {
-        await send(`DONE: Scanned ${targets.length} companies, ${discovered} eligible job(s) found, applied to ${applied}, skipped ${skipped}.`);
+        await send(`DONE: applied ${applied}, skipped ${skipped} this batch. ${alreadyToday + applied}/${dailyCap} today. ${st.pending} still queued.`);
       }
     } catch (e) {
       await send(`FATAL: ${e.message}`);

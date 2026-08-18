@@ -197,6 +197,35 @@ AtsBoardSchema.index({ atsType: 1, slug: 1 }, { unique: true });
 // The apply flow asks for "live boards, least recently probed first".
 AtsBoardSchema.index({ alive: 1, lastProbedAt: 1 });
 
+// A discovered, not-yet-attempted company-portal posting.
+//
+// This exists to decouple discovery from applying. The apply route used to
+// sweep every live board itself before submitting anything: measured at 52ms
+// per board across 13,385 boards, that is 11.6 minutes of pure discovery
+// before the first application — 78% of a 15-minute cycle. Continuous
+// operation is impossible while every tick pays that cost.
+//
+// Discovery now writes here on a slow cadence and the apply loop just drains
+// the queue, so an apply tick starts submitting within seconds.
+const PortalJobSchema = new mongoose.Schema({
+  link:        { type: String, required: true, unique: true },
+  atsType:     String,
+  atsSlug:     String,
+  companyId:   String,
+  companyName: String,
+  title:       String,
+  location:    String,
+  // pending -> applied | skipped. Anything not pending is terminal for this
+  // posting; re-discovery must not resurrect it.
+  status:      { type: String, default: 'pending', index: true },
+  reason:      String,
+  attempts:    { type: Number, default: 0 },
+  discoveredAt:{ type: Date, default: Date.now },
+  attemptedAt: Date,
+}, { timestamps: true });
+// The drain query: oldest pending first.
+PortalJobSchema.index({ status: 1, discoveredAt: 1 });
+
 const SystemStateSchema = new mongoose.Schema({
   key:   { type: String, required: true, unique: true },
   value: mongoose.Schema.Types.Mixed,
@@ -224,6 +253,7 @@ const QuestionAnswer = mongoose.models.QuestionAnswer  || mongoose.model('Questi
 const IdentitySettings = mongoose.models.IdentitySettings || mongoose.model('IdentitySettings', IdentitySettingsSchema);
 const SystemState    = mongoose.models.SystemState     || mongoose.model('SystemState',     SystemStateSchema);
 const AtsBoard       = mongoose.models.AtsBoard        || mongoose.model('AtsBoard',        AtsBoardSchema);
+const PortalJob      = mongoose.models.PortalJob       || mongoose.model('PortalJob',       PortalJobSchema);
 
 // ── JSON file helpers ─────────────────────────────────────────────────────────
 function jsonReadCompanies() {
@@ -989,4 +1019,78 @@ export async function atsBoardStats() {
     else out[t].unprobed += r.n;
   }
   return out;
+}
+
+
+// ── Portal apply queue ────────────────────────────────────────────────────────
+// $setOnInsert only: a posting already marked applied/skipped must never be
+// reset to pending by the next discovery sweep finding it again.
+export async function upsertPortalJobs(jobs) {
+  if (!jobs.length) return { inserted: 0 };
+  await connectDB();
+  const ops = jobs.map(j => ({
+    updateOne: {
+      filter: { link: j.link },
+      update: { $setOnInsert: { ...j, status: 'pending', discoveredAt: new Date() } },
+      upsert: true,
+    },
+  }));
+  let inserted = 0;
+  for (let i = 0; i < ops.length; i += 1000) {
+    const res = await PortalJob.bulkWrite(ops.slice(i, i + 1000), { ordered: false }).catch(() => null);
+    inserted += res?.upsertedCount || 0;
+  }
+  return { inserted };
+}
+
+// Atomically hands out work. findOneAndUpdate per job rather than a find()
+// then update, so two overlapping apply ticks can never claim the same
+// posting and submit it twice.
+export async function claimPortalJobs(limit = 50) {
+  await connectDB();
+  const claimed = [];
+  for (let i = 0; i < limit; i++) {
+    const doc = await PortalJob.findOneAndUpdate(
+      { status: 'pending' },
+      { $set: { status: 'in-progress', attemptedAt: new Date() }, $inc: { attempts: 1 } },
+      { sort: { discoveredAt: 1 }, new: true }
+    ).lean().catch(() => null);
+    if (!doc) break;
+    claimed.push(doc);
+  }
+  return claimed;
+}
+
+export async function markPortalJob(link, status, reason = null) {
+  await connectDB();
+  await PortalJob.updateOne({ link }, { $set: { status, reason } }).catch(() => {});
+}
+
+// A tick that dies mid-flight leaves rows stuck in-progress forever. Anything
+// held longer than the per-job timeout could justify is returned to pending.
+export async function releaseStalePortalJobs({ olderThanMinutes = 30 } = {}) {
+  await connectDB();
+  const res = await PortalJob.updateMany(
+    { status: 'in-progress', attemptedAt: { $lt: new Date(Date.now() - olderThanMinutes * 60000) } },
+    { $set: { status: 'pending' } }
+  ).catch(() => null);
+  return res?.modifiedCount || 0;
+}
+
+export async function portalQueueStats() {
+  await connectDB();
+  const rows = await PortalJob.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]);
+  const out = { pending: 0, applied: 0, skipped: 0, 'in-progress': 0 };
+  for (const r of rows) out[r._id] = r.n;
+  return out;
+}
+
+// Applications submitted since local midnight, for the daily cap.
+export async function countAppliedToday(source = null) {
+  await connectDB();
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const filter = { appliedAt: { $gte: start } };
+  if (source) filter.source = source;
+  return AppliedJob.countDocuments(filter);
 }
