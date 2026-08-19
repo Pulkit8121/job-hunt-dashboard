@@ -13,6 +13,13 @@ import {
   dismissConsentBanner, auditFilledForm,
 } from './ats-widgets.js';
 
+// Import stealth and OTP handling functionalities
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { EmailOTPReader } from './stealth-apply.js';
+
+puppeteerExtra.use(StealthPlugin());
+
 const RESUME_PATH = process.env.RESUME_PATH || path.join(process.cwd(), 'data', 'resume.pdf');
 // 25s was too tight for this 1-core server under load — bumped to 40s so a
 // slow-but-alive page load doesn't get thrown away as a hard failure.
