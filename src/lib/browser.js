@@ -3,8 +3,24 @@
 //   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check
 // Or add --remote-debugging-port=9222 to your Chrome shortcut.
 
-export async function getBrowser({ headless = false, requireConnected = false, preferConnected = true } = {}) {
-  const puppeteer = (await import('puppeteer')).default;
+// useStealth: routes browser creation (both connect and launch) through
+// puppeteer-extra + puppeteer-extra-plugin-stealth instead of plain
+// puppeteer. The plugin's evasions (navigator.webdriver, plugins/mimeTypes
+// spoofing, etc.) are applied via puppeteer-extra's own launch()/connect()
+// wrappers — a browser object handed back from plain puppeteer never gets
+// them, no matter what gets imported elsewhere. Found this wired up (stealth
+// plugin imported and registered in generic-form-apply.js) but never actually
+// taking effect, because the browser it was applying evasions to came from
+// this function's plain `puppeteer` import — the registration was dead code.
+export async function getBrowser({ headless = false, requireConnected = false, preferConnected = true, useStealth = false } = {}) {
+  let puppeteer;
+  if (useStealth) {
+    puppeteer = (await import('puppeteer-extra')).default;
+    const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+    puppeteer.use(StealthPlugin());
+  } else {
+    puppeteer = (await import('puppeteer')).default;
+  }
   const browserURL = process.env.CHROME_REMOTE_DEBUG_URL || 'http://localhost:9222';
 
   // Try connecting to existing Chrome on port 9222 first. A CDP WebSocket

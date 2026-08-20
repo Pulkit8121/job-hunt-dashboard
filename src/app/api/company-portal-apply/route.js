@@ -143,6 +143,10 @@ export async function POST(request) {
         headless: process.env.APPLY_HEADLESS === 'true',
         requireConnected: false,
         preferConnected: true,
+        // Greenhouse (and others) run bot-detection that a plain Puppeteer
+        // browser trips — this is what actually applies the stealth evasions
+        // now; importing the plugin elsewhere without this never did.
+        useStealth: true,
       }));
 
       let applied = 0;
