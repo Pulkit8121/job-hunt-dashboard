@@ -50,6 +50,8 @@ class EmailOTPReader {
   constructor(email, appPassword) {
     this.email = email;
     this.appPassword = appPassword;
+    this.lookbackMs = Number(process.env.PORTAL_SECURITY_CODE_LOOKBACK_MS) || 15 * 60000;
+    this.maxMessagesToInspect = Number(process.env.PORTAL_SECURITY_CODE_MAX_MESSAGES) || 25;
     this.transporter = createTransport({
       service: 'gmail',
       auth: {
@@ -80,32 +82,74 @@ class EmailOTPReader {
     }
   }
 
+  isOtpLikeMessage(parsed) {
+    const subject = String(parsed?.subject || '');
+    const from = [parsed?.from?.text, parsed?.from?.value?.map(v => `${v.name || ''} ${v.address || ''}`).join(' ')].filter(Boolean).join(' ');
+    const text = String(parsed?.text || '');
+    const html = String(parsed?.html || '');
+    const haystack = `${subject}\n${from}\n${text}\n${html}`.toLowerCase();
+    return /greenhouse|verification|security code|security-code|passcode|one[- ]time|otp|auth code|confirm/i.test(haystack);
+  }
+
+  extractOtp(parsed) {
+    const subject = String(parsed?.subject || '');
+    const text = String(parsed?.text || '');
+    const html = String(parsed?.html || '');
+    const haystack = `${subject}\n${text}\n${html}`;
+
+    // Prefer numbers explicitly labeled as codes before falling back to any
+    // 4-8 digit token in the message body.
+    const labeled = haystack.match(/(?:security|verification|confirm(?:ation)?|one[- ]time|auth(?:entication)?)\D{0,30}(\d{4,8})/i);
+    if (labeled?.[1]) return labeled[1];
+
+    const lines = haystack.split('\n').slice(0, 80);
+    for (const line of lines) {
+      const standalone = line.trim().match(/^(\d{4,8})$/);
+      if (standalone?.[1]) return standalone[1];
+
+      if (!/(security|verification|confirm(?:ation)?|one[- ]time|auth(?:entication)?|passcode|code)/i.test(line)) {
+        continue;
+      }
+      const match = line.match(/\b(\d{4,8})\b/);
+      if (match?.[1]) return match[1];
+    }
+    return null;
+  }
+
   async getLatestOtp() {
     const imap = await this.connectImap();
     if (!imap) return null;
 
     try {
       await imap.mailboxOpen('INBOX');
-      
-      // Look for recent emails from greenhouse or job application services
+
+      // Gmail IMAP SUBJECT search is literal-text matching, not regex. The
+      // production trace showed this going out as
+      // SUBJECT "/(?:greenhouse|otp|verification|security)/i", which can never
+      // match a real subject line. Search broadly by recency, then inspect the
+      // newest messages client-side.
       const emailSearchResults = await imap.search({
-        subject: /(?:greenhouse|otp|verification|security)/i,
-        since: new Date(Date.now() - 5 * 60000) // Last 5 minutes
+        since: new Date(Date.now() - this.lookbackMs)
       });
-      
-      if (emailSearchResults.length === 0) {
+
+      if (!emailSearchResults.length) {
         return null;
       }
-      
-      // Get the most recent email
-      const latestEmail = emailSearchResults[emailSearchResults.length - 1];
-      const message = await imap.fetchOne(latestEmail, { source: true, headers: true });
-      
-      if (message && message.source) {
-        const parsed = await simpleParser(message.source);
-        const otpMatch = parsed.text.match(/\b\d{4,6}\b/);
-        
-        return otpMatch ? otpMatch[0] : null;
+
+      const recentIds = emailSearchResults.slice(-this.maxMessagesToInspect).reverse();
+      for (const messageId of recentIds) {
+        const message = await imap.fetchOne(messageId, { source: true, internalDate: true }).catch(() => null);
+        if (!message?.source) continue;
+
+        if (message.internalDate && Date.now() - new Date(message.internalDate).getTime() > this.lookbackMs) {
+          continue;
+        }
+
+        const parsed = await simpleParser(message.source).catch(() => null);
+        if (!parsed || !this.isOtpLikeMessage(parsed)) continue;
+
+        const otp = this.extractOtp(parsed);
+        if (otp) return otp;
       }
     } catch (error) {
       console.error('Error reading email OTP:', error);
