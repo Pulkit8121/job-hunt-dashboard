@@ -197,6 +197,12 @@ export async function POST(request) {
             jobTitle: job.title,
             jobLink: job.link,
             source: 'company-portal',
+            // Never persisted before — the 2,104 pre-fix "applied" records
+            // this reason field could have flagged as fake had to be
+            // identified by commit timestamp instead, since every one of
+            // them has reason: null. Storing it going forward means that
+            // never has to happen again.
+            reason: result.reason,
           });
           await send(`✓ Applied: ${job.title} at ${job.companyName} (${result.reason})`);
         } else {
