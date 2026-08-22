@@ -4,7 +4,6 @@
 // The production company-portal flow reuses EmailOTPReader from this file when
 // Greenhouse emails a security code after submit; the broader helpers here are
 // still experimental and are not the main apply path.
-import { chromium } from 'puppeteer';
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { createTransport } from 'nodemailer';
