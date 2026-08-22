@@ -6,6 +6,7 @@
 // CAPTCHA/bot-challenge.
 import path from 'path';
 import { answerField } from './application-agent.js';
+import { getConfiguredIdentities } from './identities.js';
 import { PROFILE } from './profile.js';
 import {
   extractComboboxes, openComboboxOptions, chooseComboboxOption,
@@ -13,16 +14,9 @@ import {
   dismissConsentBanner, auditFilledForm,
 } from './ats-widgets.js';
 
-// Import stealth and OTP handling functionalities
+// Import stealth functionality for the real portal apply flow.
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-// EmailOTPReader is intentionally unused here. Greenhouse's security-code
-// fallback (see the captchaFallback handling below) exists specifically to
-// verify a human is present when its risk-scoring flags a submission —
-// auto-reading and re-entering that code would defeat the one thing it's
-// for, not just evade passive fingerprinting the way the stealth plugin
-// does. Left unwired on purpose; route those cases to the manual queue.
-// eslint-disable-next-line no-unused-vars
 import { EmailOTPReader } from './stealth-apply.js';
 
 puppeteerExtra.use(StealthPlugin());
@@ -718,6 +712,84 @@ async function classifyOutcome(page) {
   return 'unknown';
 }
 
+function mailboxForSecurityCode(recipient) {
+  const normalized = String(recipient || '').trim().toLowerCase();
+  const identities = getConfiguredIdentities();
+  if (!identities.length) return null;
+  if (normalized) {
+    const exact = identities.find(identity => identity.email.toLowerCase() === normalized);
+    if (exact) return exact;
+  }
+  const profileMatch = PROFILE.email
+    ? identities.find(identity => identity.email.toLowerCase() === PROFILE.email.toLowerCase())
+    : null;
+  return profileMatch || identities[0];
+}
+
+async function findSecurityCodeInput(page) {
+  const refId = await page.evaluate(() => {
+    const candidates = [...document.querySelectorAll('input:not([type="hidden"]), textarea')];
+    const picked = candidates.find((el) => {
+      if (el.disabled || el.readOnly) return false;
+      const parts = [
+        el.name || '',
+        el.id || '',
+        el.placeholder || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('autocomplete') || '',
+        el.closest('label')?.textContent || '',
+        el.parentElement?.textContent || '',
+      ].join(' ').toLowerCase();
+      return /security|verification|one.?time|auth|otp|passcode|\bcode\b/.test(parts);
+    });
+    if (!picked) return null;
+    const ref = `agent-security-code-${Date.now()}`;
+    picked.setAttribute('data-agent-ref', ref);
+    return ref;
+  }).catch(() => null);
+  return refId;
+}
+
+async function completeSecurityCodeChallenge(page, recipient, { onNote = () => {} } = {}) {
+  const mailbox = mailboxForSecurityCode(recipient);
+  if (!mailbox?.email || !mailbox?.appPassword) {
+    onNote('security-code fallback detected but no matching mailbox is configured');
+    return false;
+  }
+
+  onNote(`security-code fallback detected for ${recipient || mailbox.email}; waiting for email OTP`);
+  const otpReader = new EmailOTPReader(mailbox.email, mailbox.appPassword);
+  const otp = await otpReader.waitForOtp(Number(process.env.PORTAL_SECURITY_CODE_TIMEOUT_MS) || 60000);
+  if (!otp) {
+    onNote('security-code email did not arrive before timeout');
+    return false;
+  }
+
+  const fieldRef = await findSecurityCodeInput(page);
+  if (!fieldRef) {
+    onNote('security-code email arrived but no verification input was found on the page');
+    return false;
+  }
+
+  const typed = await typeTextField(page, fieldRef, otp).catch(() => false);
+  if (!typed) await fillTextField(page, fieldRef, otp).catch(() => {});
+  await page.waitForNetworkIdle({ idleTime: 500, timeout: 5000 }).catch(() => {});
+
+  const control = await findAdvanceControl(page);
+  if (!control) {
+    const clicked = await findAndClickSubmit(page);
+    if (!clicked) {
+      onNote('security code entered but no submit control was found for the retry');
+      return false;
+    }
+  } else {
+    await clickAdvanceControl(page, control).catch(() => {});
+  }
+  await page.waitForNetworkIdle({ timeout: 10000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 1500));
+  return true;
+}
+
 // Returns { success, reason, captcha? }
 export async function applyToPortalJob(browser, job, { dryRun = false, onNote = () => {} } = {}) {
   const page = await browser.newPage();
@@ -725,10 +797,8 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
   // Greenhouse answers a low-scoring CAPTCHA with 428 and a body naming the
   // address it will email a security code to:
   //   {"code":"captcha-failed","security_code_recipient":"…@gmail.com"}
-  // That code is the bot-detection fallback, so it is not something to
-  // retrieve and enter automatically. Capturing the signal instead lets the
-  // job be routed to the manual queue, where the form is already filled and
-  // only the emailed code is missing.
+  // When the matching mailbox is configured, use EmailOTPReader to fetch that
+  // code and retry the submit once; otherwise surface a manual follow-up.
   let captchaFallback = null;
   // Ashby answers its submit mutation with a structured errorMessages array
   // ("Missing entry for required field: Phone"). That is far better signal
@@ -854,6 +924,18 @@ export async function applyToPortalJob(browser, job, { dryRun = false, onNote = 
     }
 
     let outcome = await classifyOutcome(page);
+
+    if (captchaFallback) {
+      const completed = await completeSecurityCodeChallenge(
+        page,
+        typeof captchaFallback === 'string' ? captchaFallback : null,
+        { onNote },
+      );
+      if (completed) {
+        captchaFallback = null;
+        outcome = await classifyOutcome(page);
+      }
+    }
 
     // One repair pass on a rejected submit. These forms reject for a single
     // unrecognised required field far more often than for anything structural,
