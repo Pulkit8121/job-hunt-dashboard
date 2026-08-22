@@ -986,6 +986,29 @@ export async function recordBoardProbe(atsType, slug, { alive, jobCount = 0, err
   ).catch(() => {});
 }
 
+// Bumps lastProbedAt only — deliberately separate from recordBoardProbe's
+// alive/jobCount fields. readLiveBoards() sorts oldest-probed-first so a
+// bounded sweep rotates across the whole set instead of exhausting the same
+// slice every time, but that only works if something advances the timestamp
+// after each sweep. It didn't: /api/portal-queue/refresh swept boards without
+// ever touching lastProbedAt, so every run re-fetched the identical "oldest"
+// N boards forever — confirmed in production by "newly queued" decaying to 0
+// while ~70% of tracked boards had never been swept once.
+export async function touchBoardsProbedAt(boards) {
+  if (!boards.length) return;
+  await connectDB();
+  const now = new Date();
+  const ops = boards.map(b => ({
+    updateOne: {
+      filter: { atsType: b.atsType, slug: b.slug },
+      update: { $set: { lastProbedAt: now } },
+    },
+  }));
+  for (let i = 0; i < ops.length; i += 1000) {
+    await AtsBoard.bulkWrite(ops.slice(i, i + 1000), { ordered: false }).catch(() => {});
+  }
+}
+
 // Boards still needing a liveness verdict, oldest-first so re-probes rotate.
 export async function readUnprobedBoards({ limit = 5000, staleDays = null } = {}) {
   await connectDB();

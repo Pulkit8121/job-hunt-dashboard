@@ -1,7 +1,7 @@
 export const maxDuration = 900;
 export const dynamic = 'force-dynamic';
 
-import { readLiveBoards, readCompanies, readApplied, readActiveSkippedLinks, upsertPortalJobs, portalQueueStats, releaseStalePortalJobs } from '@/lib/db';
+import { readLiveBoards, readCompanies, readApplied, readActiveSkippedLinks, upsertPortalJobs, portalQueueStats, releaseStalePortalJobs, touchBoardsProbedAt } from '@/lib/db';
 import { discoverAtsJobs } from '@/lib/company-portal-discovery';
 import { isExcludedCompany, getExcludedCompanies } from '@/lib/exclusions';
 import { startRun, finishRun, isRunning } from '@/lib/portalQueueRunState';
@@ -121,6 +121,14 @@ export async function POST(request) {
       });
 
       await flush();
+
+      // Advance the rotation regardless of what each board yielded — this is
+      // what makes readLiveBoards() actually cycle through all 13,385 boards
+      // over successive runs instead of re-sweeping the same oldest slice
+      // forever. Boards that errored (try/catch above) are intentionally
+      // included too: a transient failure shouldn't permanently wedge a board
+      // at the front of every future sweep either.
+      await touchBoardsProbedAt(boards.map(b => ({ atsType: b.atsType, slug: b.slug })));
 
       const stats = await portalQueueStats();
       await send(`DONE: swept ${done} board(s), ${found} relevant posting(s) seen, ${queued} newly queued. Queue now: ${stats.pending} pending, ${stats.applied} applied, ${stats.skipped} skipped.`);
