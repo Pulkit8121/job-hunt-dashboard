@@ -8,7 +8,7 @@ import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { createTransport } from 'nodemailer';
 import { ImapFlow } from 'imapflow';
-import { parse } from 'mailparser';
+import { simpleParser } from 'mailparser';
 
 // Add stealth plugin to Puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -102,7 +102,7 @@ class EmailOTPReader {
       const message = await imap.fetchOne(latestEmail, { source: true, headers: true });
       
       if (message && message.source) {
-        const parsed = await parse(message.source);
+        const parsed = await simpleParser(message.source);
         const otpMatch = parsed.text.match(/\b\d{4,6}\b/);
         
         return otpMatch ? otpMatch[0] : null;
